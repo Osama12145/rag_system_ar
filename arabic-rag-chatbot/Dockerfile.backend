@@ -19,22 +19,21 @@ RUN useradd --create-home --shell /bin/bash appuser
 # Working directory
 WORKDIR /app
 
-# Install Python dependencies first (leverages Docker layer caching)
-COPY requirements.txt .
+# 1. انسخ ملف المتطلبات من داخل مجلد الباك أند
+COPY arabic-rag-chatbot/requirements.txt .
 RUN pip install --no-cache-dir --user -r requirements.txt
 
-
 # ================================================
-# Runtime image (smaller, no build tools)
+# Runtime image (النسخة النهائية الصغيره)
 # ================================================
 FROM python:3.11-slim AS runtime
 
 # Copy installed packages from builder
 COPY --from=builder /root/.local /root/.local
 
-# Copy application code
+# 2. انتبه هنا: لازم ننسخ كود الباك أند فقط
 WORKDIR /app
-COPY . .
+COPY arabic-rag-chatbot/ .
 
 # Ensure scripts in .local are usable
 ENV PATH=/root/.local/bin:$PATH
