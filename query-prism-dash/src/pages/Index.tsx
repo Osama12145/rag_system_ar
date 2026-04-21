@@ -24,6 +24,13 @@ const Dashboard = () => {
   const [panelOpen, setPanelOpen] = useState(false);
   const [activeCitation, setActiveCitation] = useState<Citation | null>(null);
   const [allCitations, setAllCitations] = useState<Citation[]>([]);
+  const [sessionId] = useState(() => {
+    const existing = window.localStorage.getItem("os-ai-session-id");
+    if (existing) return existing;
+    const created = `session-${crypto.randomUUID()}`;
+    window.localStorage.setItem("os-ai-session-id", created);
+    return created;
+  });
 
   const handleSubmit = useCallback(
     async (text: string, opts: ChatOptions) => {
@@ -43,6 +50,7 @@ const Dashboard = () => {
           ...opts,
           language: lang,
           history,
+          sessionId,
         })) {
           if (chunk.delta) {
             acc += chunk.delta;
@@ -66,7 +74,7 @@ const Dashboard = () => {
         setBusy(false);
       }
     },
-    [messages, lang, t],
+    [messages, lang, sessionId, t],
   );
 
   const handleCitationClick = (c: Citation) => {

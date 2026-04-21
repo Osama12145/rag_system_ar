@@ -1,0 +1,4 @@
+query-prism-dash/.npm-cache/
+query-prism-dash/node_modules/
+arabic-rag-chatbot/*.db
+arabic-rag-chatbot/.venv/

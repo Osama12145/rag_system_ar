@@ -19,13 +19,13 @@ class Settings(BaseSettings):
     LANGCHAIN_PROJECT: str = "company-intelligence-rag"
 
     # API Keys (required)
-    OPENROUTER_API_KEY: str
-    COHERE_API_KEY: str
+    OPENROUTER_API_KEY: Optional[str] = None
+    COHERE_API_KEY: Optional[str] = None
 
     # Qdrant Vector DB
     # Use "local" for file-based local mode (no Docker needed) — overridden by .env
     # In Coolify, use the internal service URL — default below
-    QDRANT_URL: str = "http://qdrant-eso00kc0k8ww0k4g00wkcw0g:6333"
+    QDRANT_URL: str = "local"
     QDRANT_API_KEY: Optional[str] = None
     QDRANT_COLLECTION_NAME: str = "company-documents"
     EMBEDDING_MODEL: str = "embed-multilingual-v3.0"
@@ -33,10 +33,13 @@ class Settings(BaseSettings):
     # PostgreSQL Database (via asyncpg driver)
     # Format: postgresql+asyncpg://user:password@host:port/dbname
     # In Coolify, DATABASE_URL is injected by platform
-    DATABASE_URL: Optional[str] = None
+    DATABASE_URL: str = "sqlite+aiosqlite:///./app_data.db"
+
+    # Startup behavior
+    RESTORE_CHAT_HISTORY_ON_STARTUP: bool = False
 
     # LLM Configuration
-    LLM_MODEL: str = "cohere/command-r-plus"
+    LLM_MODEL: str = "cohere/command-r-plus-08-2024"
     TEMPERATURE: float = 0.7
     MAX_TOKENS: int = 1500
 
@@ -63,7 +66,7 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
 
     # CORS — comma-separated list of allowed frontend origins
-    ALLOWED_ORIGINS: str = "http://localhost:5173,http://localhost:3000"
+    ALLOWED_ORIGINS: str = "http://localhost:3000,http://localhost:5173,http://localhost:8080"
 
     class Config:
         env_file = ".env"

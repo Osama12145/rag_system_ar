@@ -26,6 +26,9 @@ class VectorStoreManager:
         """
         Initialize Qdrant client and Cohere embeddings.
         """
+        if not settings.COHERE_API_KEY:
+            raise ValueError("COHERE_API_KEY is required to initialize the vector store.")
+
         self.embeddings = CohereEmbeddings(
             cohere_api_key=settings.COHERE_API_KEY,
             model=settings.EMBEDDING_MODEL
@@ -59,6 +62,10 @@ class VectorStoreManager:
         """
         Add documents to the vector database.
         """
+        if not documents:
+            logger.info("No documents received for indexing")
+            return True
+
         try:
             logger.info(f"Adding {len(documents)} documents to Qdrant...")
             

@@ -74,7 +74,7 @@ const Library = () => {
             {t("upload_cta")}
             <input
               type="file"
-              accept="application/pdf"
+              accept=".pdf,.txt,.docx,application/pdf,text/plain,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
               multiple
               className="hidden"
               onChange={(e) => handleFiles(e.target.files)}
@@ -93,7 +93,7 @@ const Library = () => {
         >
           <input
             type="file"
-            accept="application/pdf"
+            accept=".pdf,.txt,.docx,application/pdf,text/plain,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             multiple
             className="hidden"
             onChange={(e) => handleFiles(e.target.files)}

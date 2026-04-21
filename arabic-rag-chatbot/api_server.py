@@ -1,46 +1,35 @@
 """
-api_server.py - FastAPI Backend with Dual-Database Persistence
-PostgreSQL (SQLAlchemy) for metadata + Qdrant for vector search.
+api_server.py - FastAPI backend for the Arabic RAG system.
 Run with: uvicorn api_server:app --reload
 """
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, File, UploadFile, BackgroundTasks, Request
-from fastapi.responses import StreamingResponse
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, validator
-from typing import List, Optional, Dict, Any
-from pathlib import Path
-import logging
-import asyncio
-import uuid
 from datetime import datetime, timezone
+import asyncio
+import logging
+from pathlib import Path
+import threading
+from typing import Any, Dict, List, Optional
+import uuid
 
-from sqlalchemy import text  # SQLAlchemy 2.0: required for raw SQL strings
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field, field_validator, model_validator
+from sqlalchemy import text
 
+from config import settings
+from database import ChatHistory, FileMetadata, close_db, get_async_session, init_db
+from document_processor import DocumentProcessor
 from rag_pipeline import RAGChatbot
 from vector_store import VectorStoreManager
-from document_processor import DocumentProcessor
-from config import settings
-from database import (
-    Base,
-    FileMetadata,
-    ChatHistory,
-    get_async_session,
-    init_db,
-    close_db,
-)
-from langchain_core.messages import HumanMessage, AIMessage
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Global instances
 vs_manager: Optional[VectorStoreManager] = None
 chatbot: Optional[RAGChatbot] = None
 
-
-# ============= Lifespan (Startup / Shutdown) =============
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -48,492 +37,502 @@ async def lifespan(app: FastAPI):
     global vs_manager, chatbot
     logger.info("Starting application...")
 
-    # ── Initialize PostgreSQL tables ──
     try:
         await init_db()
-        logger.info("PostgreSQL tables initialized")
+        logger.info("Database initialized")
     except Exception as e:
-        logger.error(f"Database init error: {e}")
-        # Continue — Qdrant may still work
+        logger.error("Database init error: %s", e)
 
-    # ── Initialize Vector Store & Chatbot ──
     try:
         vs_manager = VectorStoreManager()
         chatbot = RAGChatbot(vs_manager)
-
-        # Restore conversation from DB if any exists
-        await restore_conversation()
-        logger.info("Application initialized successfully (vector store + chatbot)")
+        if settings.RESTORE_CHAT_HISTORY_ON_STARTUP:
+            logger.info("Chat history restore is enabled, but history is client-managed per session.")
+        logger.info("Application initialized successfully")
     except Exception as e:
-        logger.error(f"Startup error: {e}")
+        logger.error("Startup error: %s", e)
 
     yield
 
-    # ── Cleanup ──
     logger.info("Shutting down application...")
     await close_db()
     logger.info("Application shutdown complete")
 
 
-# ── Helper: Restore recent conversation from DB ─────────────────────────────
-
-async def restore_conversation():
-    """Load most recent chat history into memory on startup."""
-    if not chatbot:
-        return
-    try:
-        async with get_async_session() as session:
-            result = await session.execute(
-                text("""
-                SELECT user_message, ai_response
-                FROM chat_history
-                ORDER BY timestamp DESC
-                LIMIT 20
-                """)
-            )
-            rows = result.fetchall()
-            # Reverse to chronological order
-            for user_msg, ai_msg in reversed(rows):
-                chatbot.conversation_history.append(HumanMessage(content=user_msg))
-                chatbot.conversation_history.append(AIMessage(content=ai_msg))
-            logger.info(f"Restored {len(rows)} conversation turns from database")
-    except Exception as e:
-        logger.warning(f"Could not restore conversation: {e}")
-
-
-# ============= App =============
-
 app = FastAPI(
     title="Company Intelligence RAG API",
-    description="API for querying company documents via RAG (Retrieval-Augmented Generation)",
-    version="1.1.0",
+    description="API for querying company documents via RAG",
+    version="1.2.0",
     lifespan=lifespan,
 )
 
-# CORS — restricted to known frontend origins only
-ALLOWED_ORIGINS = [o.strip() for o in settings.ALLOWED_ORIGINS.split(",") if o.strip()]
-
+allowed_origins = [origin.strip() for origin in settings.ALLOWED_ORIGINS.split(",") if origin.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["Content-Type", "Authorization"],
 )
 
 
-# ============= Pydantic Models =============
-
 class ChatRequest(BaseModel):
-    """Chat request payload (matches frontend structure)."""
+    """Chat request payload."""
+
     message: str = Field(default="", max_length=4000)
-    query: Optional[str] = None  # Fallback
+    query: Optional[str] = None
     sourceCheck: bool = True
     deepResearch: bool = False
     reasoning: bool = False
     language: str = "en"
     history: Optional[List[Dict[str, Any]]] = None
-    sessionId: Optional[str] = None  # Optional client-provided session id
+    sessionId: Optional[str] = None
 
-    @validator("message")
-    def message_not_empty(cls, v, values):
-        query = values.get("query") or ""
-        if not v.strip() and not query.strip():
+    @field_validator("message")
+    @classmethod
+    def trim_message(cls, value: str) -> str:
+        return value.strip()
+
+    @model_validator(mode="after")
+    def validate_message_or_query(self):
+        if not self.message and not (self.query or "").strip():
             raise ValueError("message or query must not be empty")
-        return v
+        return self
 
 
 class DocumentRecord(BaseModel):
     """Single document metadata record returned to the frontend."""
+
     id: str
     name: str
     size: int
     pages: int
     chunks: int
     uploadedAt: str
-    status: str  # "ready" | "indexing" | "error"
+    status: str
 
 
 class DocumentUploadResponse(BaseModel):
     """Document upload response."""
+
     message: str
     file_id: str
     success: bool
+    document: Optional[DocumentRecord] = None
 
 
 class HealthResponse(BaseModel):
     """Health check response."""
+
     status: str
     initialized: bool
     total_vectors: Optional[int] = None
     db_connected: bool = False
 
 
-# ============= Health Check =============
+async def save_chat_message(session_id: str, user_message: str, ai_response: str):
+    """Persist a chat exchange."""
+    if not user_message and not ai_response:
+        return
+    try:
+        async with get_async_session() as session:
+            session.add(
+                ChatHistory(
+                    session_id=session_id,
+                    user_message=user_message,
+                    ai_response=ai_response,
+                    timestamp=datetime.now(timezone.utc),
+                )
+            )
+            await session.commit()
+    except Exception as e:
+        logger.error("Failed to save chat history: %s", e)
+
+
+def persist_chat_message(session_id: str, user_message: str, ai_response: str) -> None:
+    """Persist chat history whether or not the current thread has a running event loop."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        thread = threading.Thread(
+            target=lambda: asyncio.run(save_chat_message(session_id, user_message, ai_response)),
+            daemon=True,
+        )
+        thread.start()
+    else:
+        loop.create_task(save_chat_message(session_id, user_message, ai_response))
+
+
+def build_document_record(
+    *,
+    file_id: str,
+    filename: str,
+    file_size: int,
+    pages: int,
+    chunks: int,
+    upload_date: datetime,
+    status: str,
+) -> DocumentRecord:
+    if isinstance(upload_date, str):
+        try:
+            parsed_upload_date = datetime.fromisoformat(upload_date)
+        except ValueError:
+            parsed_upload_date = None
+    else:
+        parsed_upload_date = upload_date
+
+    return DocumentRecord(
+        id=file_id,
+        name=filename,
+        size=file_size,
+        pages=pages,
+        chunks=chunks,
+        uploadedAt=parsed_upload_date.strftime("%Y-%m-%d") if parsed_upload_date else "",
+        status=status,
+    )
+
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
-    """Check system health status (Qdrant + PostgreSQL)."""
+    """Check system health status."""
     qdrant_ok = chatbot is not None
     db_ok = False
 
-    # Check DB connectivity
     try:
         async with get_async_session() as session:
             await session.execute(text("SELECT 1"))
             db_ok = True
     except Exception as e:
-        logger.warning(f"DB health check failed: {e}")
+        logger.warning("DB health check failed: %s", e)
 
-    try:
-        stats = vs_manager.get_index_stats() if vs_manager else {}
-        return HealthResponse(
-            status="healthy" if qdrant_ok and db_ok else "degraded",
-            initialized=chatbot is not None,
-            total_vectors=stats.get("total_vectors"),
-            db_connected=db_ok,
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    stats = vs_manager.get_index_stats() if vs_manager else {}
+    return HealthResponse(
+        status="healthy" if qdrant_ok and db_ok else "degraded",
+        initialized=chatbot is not None,
+        total_vectors=stats.get("total_vectors"),
+        db_connected=db_ok,
+    )
 
-
-# ============= Chat Endpoints =============
 
 @app.post("/api/chat")
 async def chat(request: ChatRequest):
-    """
-    Stream a response to the chatbot using chunked transfer.
-    Optionally appends [CITATIONS]{...} at end of stream.
-    Persists conversation to PostgreSQL.
-    """
+    """Stream a response from the chatbot."""
     if not chatbot:
-        raise HTTPException(status_code=503, detail="Chatbot not initialized. Please wait...")
+        raise HTTPException(status_code=503, detail="Chatbot not initialized. Check API keys and vector store config.")
 
     try:
-        user_msg = request.message.strip() if request.message.strip() else (request.query or "").strip()
-        logger.info(f"New query [{request.language}]: {user_msg[:80]}")
-
-        # Determine session ID (client-provided or new)
+        user_message = request.message or (request.query or "").strip()
         session_id = request.sessionId or str(uuid.uuid4())
+        logger.info("New query [%s]: %s", request.language, user_message[:80])
 
         generator = chatbot.stream_chat(
-            user_query=user_msg,
+            user_query=user_message,
             include_sources=request.sourceCheck,
             language=request.language,
-            on_response_complete=lambda response: asyncio.create_task(
-                save_chat_message(session_id, user_msg, response)
-            ),
+            history=request.history,
+            on_response_complete=lambda response: persist_chat_message(session_id, user_message, response),
         )
-
         return StreamingResponse(generator, media_type="text/plain")
-
     except Exception as e:
-        logger.error(f"Chat error: {e}")
+        logger.error("Chat error: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
-
-
-async def save_chat_message(session_id: str, user_message: str, ai_response: str):
-    """Persist a chat exchange to PostgreSQL."""
-    if not user_message and not ai_response:
-        return
-    try:
-        async with get_async_session() as session:
-            record = ChatHistory(
-                session_id=session_id,
-                user_message=user_message,
-                ai_response=ai_response,
-                timestamp=datetime.now(timezone.utc),
-            )
-            session.add(record)
-            await session.commit()
-            logger.debug(f"Saved chat message for session {session_id}")
-    except Exception as e:
-        logger.error(f"Failed to save chat history: {e}")
 
 
 @app.get("/api/chat/history")
 async def get_chat_history(session_id: Optional[str] = None):
-    """
-    Get conversation history.
-    If session_id provided, return messages for that session.
-    Otherwise return the most recent session.
-    """
+    """Return persisted conversation history."""
     try:
         async with get_async_session() as db:
             if session_id:
-                stmt = text("""
-                SELECT user_message, ai_response, timestamp
-                FROM chat_history
-                WHERE session_id = :sid
-                ORDER BY timestamp ASC
-    """)
-                result = await db.execute(stmt, {"sid": session_id})
+                selected_session_id = session_id
             else:
-                # Get the most recent session_id
-                sid_result = await db.execute(text("SELECT session_id FROM chat_history ORDER BY timestamp DESC LIMIT 1"))
-                recent_sid = sid_result.scalar_one_or_none()
-                if not recent_sid:
+                sid_result = await db.execute(
+                    text("SELECT session_id FROM chat_history ORDER BY timestamp DESC LIMIT 1")
+                )
+                selected_session_id = sid_result.scalar_one_or_none()
+                if not selected_session_id:
                     return {"history": [], "message_count": 0, "session_id": None}
-                stmt = text("""
-                SELECT user_message, ai_response, timestamp
-                FROM chat_history
-                WHERE session_id = :sid
-                ORDER BY timestamp ASC
-    """)
-                result = await db.execute(stmt, {"sid": recent_sid})
-                session_id = recent_sid
 
+            result = await db.execute(
+                text(
+                    """
+                    SELECT user_message, ai_response, timestamp
+                    FROM chat_history
+                    WHERE session_id = :sid
+                    ORDER BY timestamp ASC
+                    """
+                ),
+                {"sid": selected_session_id},
+            )
             rows = result.fetchall()
-            history = [
-                {"role": "user", "content": row[0], "timestamp": row[2].isoformat()}
-                for row in rows
-            ] + [
-                {"role": "assistant", "content": row[1], "timestamp": row[2].isoformat()}
-                for row in rows
-            ]
-            # Sort by timestamp
-            history.sort(key=lambda x: x["timestamp"])
 
-            return {
-                "history": history,
-                "message_count": len(rows),
-                "session_id": session_id,
-            }
+        history: List[Dict[str, str]] = []
+        for user_message, ai_response, timestamp in rows:
+            iso_timestamp = timestamp.isoformat()
+            history.append({"role": "user", "content": user_message, "timestamp": iso_timestamp})
+            history.append({"role": "assistant", "content": ai_response, "timestamp": iso_timestamp})
+
+        return {
+            "history": history,
+            "message_count": len(rows),
+            "session_id": selected_session_id,
+        }
     except Exception as e:
-        logger.error(f"Chat history error: {e}")
+        logger.error("Chat history error: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/chat/clear")
 async def clear_history(session_id: Optional[str] = None):
-    """
-    Clear conversation history.
-    If session_id provided, delete only that session.
-    Otherwise delete the most recent session.
-    """
+    """Clear conversation history."""
     try:
         async with get_async_session() as db:
-            if session_id:
+            selected_session_id = session_id
+            if not selected_session_id:
+                sid_result = await db.execute(
+                    text("SELECT session_id FROM chat_history ORDER BY timestamp DESC LIMIT 1")
+                )
+                selected_session_id = sid_result.scalar_one_or_none()
+
+            if selected_session_id:
                 await db.execute(
                     text("DELETE FROM chat_history WHERE session_id = :sid"),
-                    {"sid": session_id},
+                    {"sid": selected_session_id},
                 )
-            else:
-                # Get most recent session_id and delete it
-                sid_result = await db.execute(text("SELECT session_id FROM chat_history ORDER BY timestamp DESC LIMIT 1"))
-                recent_sid = sid_result.scalar_one_or_none()
-                if recent_sid:
-                    await db.execute(
-                        text("DELETE FROM chat_history WHERE session_id = :sid"),
-                        {"sid": recent_sid},
-                    )
+                await db.commit()
 
-            # Also clear in-memory history
             if chatbot:
                 chatbot.clear_history()
 
-            return {"message": "History cleared"}
+        return {"message": "History cleared"}
     except Exception as e:
-        logger.error(f"Clear history error: {e}")
+        logger.error("Clear history error: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ============= Sessions Endpoint =============
-
 @app.get("/api/sessions")
 async def list_sessions():
-    """
-    Return distinct conversation sessions derived from chat_history table.
-    """
+    """Return distinct conversation sessions."""
     try:
         async with get_async_session() as db:
             result = await db.execute(
-                text("""
-                SELECT
-                    session_id,
-                    MAX(timestamp) as updated_at,
-                    COUNT(*) as message_count,
-                    MAX(user_message) as preview_text
-                FROM chat_history
-                GROUP BY session_id
-                ORDER BY updated_at DESC
-                LIMIT 20
-                """)
+                text(
+                    """
+                    SELECT
+                        session_id,
+                        MAX(timestamp) AS updated_at,
+                        COUNT(*) AS message_count,
+                        MAX(user_message) AS preview_text
+                    FROM chat_history
+                    GROUP BY session_id
+                    ORDER BY updated_at DESC
+                    LIMIT 20
+                    """
+                )
             )
             rows = result.fetchall()
-            sessions = [
-                {
-                    "id": row[0],
-                    "title": (row[3] or "Session")[:60],
-                    "preview": (row[3] or "Session")[:60],
-                    "updatedAt": row[1].strftime("%Y-%m-%d") if row[1] else datetime.now().strftime("%Y-%m-%d"),
-                    "messageCount": row[2],
-                }
-                for row in rows
-            ]
-            return {"sessions": sessions}
+
+        sessions = [
+            {
+                "id": row[0],
+                "title": (row[3] or "Session")[:60],
+                "preview": (row[3] or "Session")[:60],
+                "updatedAt": row[1].strftime("%Y-%m-%d") if row[1] else datetime.now().strftime("%Y-%m-%d"),
+                "messageCount": row[2],
+            }
+            for row in rows
+        ]
+        return {"sessions": sessions}
     except Exception as e:
-        logger.error(f"List sessions error: {e}")
+        logger.error("List sessions error: %s", e)
         return {"sessions": []}
 
 
-# ============= Document Management =============
-
 @app.get("/api/documents", response_model=List[DocumentRecord])
 async def list_documents():
-    """
-    Return list of indexed documents from PostgreSQL file_metadata table.
-    """
+    """Return indexed documents from the metadata store."""
     try:
         async with get_async_session() as db:
             result = await db.execute(
-                text("""
-                SELECT file_id, filename, file_size, pages, chunks, upload_date, status
-                FROM file_metadata
-                ORDER BY upload_date DESC
-                """)
+                text(
+                    """
+                    SELECT file_id, filename, file_size, pages, chunks, upload_date, status
+                    FROM file_metadata
+                    ORDER BY upload_date DESC
+                    """
+                )
             )
             rows = result.fetchall()
-            docs: List[Dict[str, Any]] = []
-            for row in rows:
-                docs.append(
-                    DocumentRecord(
-                        id=row[0],
-                        name=row[1],
-                        size=row[2],
-                        pages=row[3] or 0,
-                        chunks=row[4] or 0,
-                        uploadedAt=row[5].strftime("%Y-%m-%d") if row[5] else "",
-                        status=row[6] or "ready",
-                    )
-                )
-            return docs
+
+        return [
+            build_document_record(
+                file_id=row[0],
+                filename=row[1],
+                file_size=row[2] or 0,
+                pages=row[3] or 0,
+                chunks=row[4] or 0,
+                upload_date=row[5],
+                status=row[6] or "ready",
+            )
+            for row in rows
+        ]
     except Exception as e:
-        logger.error(f"List documents error: {e}")
+        logger.error("List documents error: %s", e)
         return []
 
 
 @app.post("/api/documents/upload", response_model=DocumentUploadResponse)
-async def upload_documents(
-    files: List[UploadFile] = File(...),
-    background_tasks: BackgroundTasks = None,
-):
-    """
-    Upload and index new PDF documents.
-    Persistence flow:
-    1. Create FileMetadata row (status=indexing)
-    2. Save files to ./temp_uploads
-    3. Process & embed → Qdrant
-    4. Update FileMetadata row (status=ready, chunks populated)
-    """
+async def upload_documents(files: List[UploadFile] = File(...)):
+    """Upload and index new documents."""
     if not vs_manager:
         raise HTTPException(status_code=503, detail="Vector Store not initialized")
 
-    # ── Security: Validate files ──
-    MAX_SIZE_BYTES = 50 * 1024 * 1024
-    for file in files:
-        if not any(file.filename.lower().endswith(ext) for ext in [".pdf", ".txt", ".docx"]):
-            raise HTTPException(status_code=400, detail=f"Only PDF, TXT, and DOCX files are accepted: {file.filename}")
-        content = await file.read()
-        if len(content) > MAX_SIZE_BYTES:
-            raise HTTPException(status_code=413, detail=f"File too large (max 50 MB): {file.filename}")
-        await file.seek(0)
-
+    max_size_bytes = 50 * 1024 * 1024
     temp_dir = Path("./temp_uploads")
     temp_dir.mkdir(exist_ok=True)
 
     saved_files: List[Path] = []
     file_ids: List[str] = []
+    file_sizes: Dict[str, int] = {}
+    upload_date = datetime.now(timezone.utc)
 
     try:
-        # ── Phase 1: Persist FileMetadata rows (status=indexing) ──
         for file in files:
-            file_id = str(uuid.uuid4())
-            file_ids.append(file_id)
-            file_path = temp_dir / file.filename
+            if not file.filename:
+                raise HTTPException(status_code=400, detail="Each uploaded file must have a filename.")
+            if not any(file.filename.lower().endswith(ext) for ext in [".pdf", ".txt", ".docx"]):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Only PDF, TXT, and DOCX files are accepted: {file.filename}",
+                )
 
-            # Save file to disk
+            content = await file.read()
+            if len(content) > max_size_bytes:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"File too large (max 50 MB): {file.filename}",
+                )
+
+            file_id = str(uuid.uuid4())
+            file_path = temp_dir / file.filename
+            file_ids.append(file_id)
+            file_sizes[file_id] = len(content)
+
             with open(file_path, "wb") as f:
-                f.write(await file.read())
+                f.write(content)
             saved_files.append(file_path)
 
-            # Insert metadata into PostgreSQL
             try:
                 async with get_async_session() as session:
-                    meta = FileMetadata(
-                        file_id=file_id,
-                        filename=file.filename,
-                        file_size=file.size,
-                        upload_date=datetime.now(timezone.utc),
-                        collection_name=settings.QDRANT_COLLECTION_NAME,
-                        status="indexing",
-                        pages=0,
-                        chunks=0,
+                    session.add(
+                        FileMetadata(
+                            file_id=file_id,
+                            filename=file.filename,
+                            file_size=file_sizes[file_id],
+                            upload_date=upload_date,
+                            collection_name=settings.QDRANT_COLLECTION_NAME,
+                            status="indexing",
+                            pages=0,
+                            chunks=0,
+                        )
                     )
-                    session.add(meta)
                     await session.commit()
-                    logger.info(f"Persisted FileMetadata: {file_id} → {file.filename}")
             except Exception as db_err:
-                logger.error(f"DB insert failed for {file.filename}: {db_err}")
-                # Continue processing — at worst Qdrant has data but DB is out of sync
+                logger.error("DB insert failed for %s: %s", file.filename, db_err)
 
-        # ── Phase 2: Process documents, embed, store in Qdrant ──
         processor = DocumentProcessor()
         documents = processor.process_documents(str(temp_dir))
+        total_chunks = len(documents)
 
-        if documents:
-            vs_manager.add_documents_to_vectorstore(documents)
-            total_chunks = len(documents)
-        else:
-            total_chunks = 0
+        if documents and not vs_manager.add_documents_to_vectorstore(documents):
+            raise RuntimeError("Failed to index uploaded documents into Qdrant.")
 
-        # ── Phase 3: Update FileMetadata with final counts (by file_id, not filename) ──
-        # Build a map from filename → total chunk count
         chunks_per_file: Dict[str, int] = {}
+        pages_per_file: Dict[str, int] = {}
         for doc in documents:
             src = doc.metadata.get("source", "")
             chunks_per_file[src] = chunks_per_file.get(src, 0) + 1
+            page_num = doc.metadata.get("page")
+            if isinstance(page_num, int):
+                pages_per_file[src] = max(pages_per_file.get(src, 0), page_num + 1)
 
-        # Update each file individually using its file_id
+        first_document: Optional[DocumentRecord] = None
         for file_id, file_path in zip(file_ids, saved_files):
             filename = file_path.name
-            chunks_for_this = chunks_per_file.get(filename, 0)
+            pages = pages_per_file.get(filename, 0)
+            chunks = chunks_per_file.get(filename, 0)
             try:
                 async with get_async_session() as db:
                     await db.execute(
-                        text("""
-                        UPDATE file_metadata
-                        SET status = 'ready',
-                            chunks = :chunks,
-                            pages = :pages
-                        WHERE file_id = :fid
-                        """),
-                        {
-                            "chunks": chunks_for_this,
-                            "pages": 0,  # TODO: extract actual page count from PDF
-                            "fid": file_id,
-                        },
+                        text(
+                            """
+                            UPDATE file_metadata
+                            SET status = 'ready',
+                                chunks = :chunks,
+                                pages = :pages,
+                                error_message = NULL
+                            WHERE file_id = :fid
+                            """
+                        ),
+                        {"chunks": chunks, "pages": pages, "fid": file_id},
                     )
                     await db.commit()
             except Exception as upd_err:
-                logger.error(f"Failed to update metadata for {filename} (file_id={file_id}): {upd_err}")
+                logger.error("Failed to update metadata for %s (%s): %s", filename, file_id, upd_err)
+
+            if first_document is None:
+                first_document = build_document_record(
+                    file_id=file_id,
+                    filename=filename,
+                    file_size=file_sizes[file_id],
+                    pages=pages,
+                    chunks=chunks,
+                    upload_date=upload_date,
+                    status="ready",
+                )
 
         return DocumentUploadResponse(
             message=f"Successfully indexed {total_chunks} chunks from {len(saved_files)} file(s)",
             file_id=file_ids[0] if file_ids else "",
             success=True,
+            document=first_document,
         )
-
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Upload error: {e}")
+        logger.error("Upload error: %s", e)
+        for file_id in file_ids:
+            try:
+                async with get_async_session() as db:
+                    await db.execute(
+                        text(
+                            """
+                            UPDATE file_metadata
+                            SET status = 'error',
+                                error_message = :error_message
+                            WHERE file_id = :fid
+                            """
+                        ),
+                        {"fid": file_id, "error_message": str(e)},
+                    )
+                    await db.commit()
+            except Exception as mark_err:
+                logger.error("Failed to mark upload %s as error: %s", file_id, mark_err)
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        for file_path in saved_files:
+            try:
+                if file_path.exists():
+                    file_path.unlink()
+            except Exception as cleanup_err:
+                logger.warning("Failed to remove temp file %s: %s", file_path, cleanup_err)
 
 
 @app.get("/api/documents/stats")
 async def get_document_stats():
     """Get vector index and file statistics."""
+    file_count = 0
+    total_chunks = 0
     try:
         async with get_async_session() as db:
             result = await db.execute(text("SELECT COUNT(*), SUM(chunks) FROM file_metadata"))
@@ -541,19 +540,12 @@ async def get_document_stats():
             file_count = file_count or 0
             total_chunks = total_chunks or 0
     except Exception as e:
-        logger.error(f"DB stats error: {e}")
-        file_count = 0
-        total_chunks = 0
+        logger.error("DB stats error: %s", e)
 
-    try:
-        vs_stats = vs_manager.get_index_stats() if vs_manager else {}
-        qdrant_vectors = vs_stats.get("total_vectors", 0)
-    except Exception:
-        qdrant_vectors = 0
-
+    vs_stats = vs_manager.get_index_stats() if vs_manager else {}
     return {
         "collection_name": settings.QDRANT_COLLECTION_NAME,
-        "total_chunks": qdrant_vectors,
+        "total_chunks": vs_stats.get("total_vectors", 0),
         "indexed_files": file_count,
         "chunks_per_file": total_chunks,
     }
@@ -561,43 +553,37 @@ async def get_document_stats():
 
 @app.delete("/api/documents")
 async def clear_all_documents():
-    """
-    Delete all documents from Qdrant AND file_metadata table.
-    Destructive — use with caution.
-    """
+    """Delete all documents from Qdrant and file metadata."""
     success_qdrant = False
     success_db = False
 
-    # Delete from Qdrant
     try:
-        success_qdrant = vs_manager.delete_all_documents()
+        if vs_manager:
+            success_qdrant = vs_manager.delete_all_documents()
     except Exception as e:
-        logger.error(f"Qdrant clear error: {e}")
+        logger.error("Qdrant clear error: %s", e)
 
-    # Delete from PostgreSQL
     try:
         async with get_async_session() as db:
             await db.execute(text("DELETE FROM file_metadata"))
             await db.commit()
         success_db = True
     except Exception as e:
-        logger.error(f"PostgreSQL clear error: {e}")
+        logger.error("Database clear error: %s", e)
 
     if success_qdrant and success_db:
-        return {"message": "All documents deleted from Qdrant and PostgreSQL"}
-    elif success_qdrant or success_db:
-        return {"message": "Partial deletion — check logs"}
-    else:
-        raise HTTPException(status_code=500, detail="Failed to delete documents from both stores")
+        return {"message": "All documents deleted from Qdrant and metadata store"}
+    if success_qdrant or success_db:
+        return {"message": "Partial deletion completed. Check logs for details."}
+    raise HTTPException(status_code=500, detail="Failed to delete documents from both stores")
 
-
-# ============= Search Endpoint =============
 
 @app.post("/api/search")
 async def search(query: str, top_k: int = 5):
-    """Search documents directly via Qdrant."""
+    """Search indexed documents directly via Qdrant."""
     if not vs_manager:
         raise HTTPException(status_code=503, detail="Vector Store not initialized")
+
     try:
         results = vs_manager.search_documents(query, top_k=top_k)
         return {
@@ -616,17 +602,15 @@ async def search(query: str, top_k: int = 5):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ============= Usage / Token Stats =============
-
 @app.get("/api/usage")
 async def get_usage():
-    """Return vector store usage + DB file count as a proxy for token usage."""
+    """Return a rough usage estimate."""
     qdrant_chunks = 0
-    try:
-        stats = vs_manager.get_index_stats()
-        qdrant_chunks = stats.get("total_vectors", 0)
-    except Exception:
-        pass
+    if vs_manager:
+        try:
+            qdrant_chunks = vs_manager.get_index_stats().get("total_vectors", 0)
+        except Exception:
+            qdrant_chunks = 0
 
     db_files = 0
     try:
@@ -634,9 +618,9 @@ async def get_usage():
             result = await db.execute(text("SELECT COUNT(*) FROM file_metadata"))
             db_files = result.scalar_one_or_none() or 0
     except Exception:
-        pass
+        db_files = 0
 
-    estimated_tokens = (qdrant_chunks + db_files) * 500  # rough heuristic
+    estimated_tokens = (qdrant_chunks + db_files) * 500
     return {
         "used": estimated_tokens,
         "total": 1_000_000,
@@ -645,18 +629,16 @@ async def get_usage():
     }
 
 
-# ============= Root =============
-
 @app.get("/")
 async def root():
     """Root endpoint with API info."""
     return {
         "name": "Company Intelligence RAG API",
-        "version": "1.1.0",
+        "version": "1.2.0",
         "docs": "/docs",
         "status": "healthy" if chatbot else "initializing",
         "databases": {
             "qdrant": chatbot is not None,
-            "postgresql": True,  # DB init happens at startup
+            "metadata": True,
         },
     }

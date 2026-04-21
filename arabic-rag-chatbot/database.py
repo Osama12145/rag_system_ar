@@ -1,9 +1,8 @@
 """
 database.py - SQLAlchemy Async Database Setup
-Provides async PostgreSQL connectivity with declarative models.
+Provides async database connectivity with declarative models.
 """
 
-import os
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
@@ -12,20 +11,24 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 import logging
+from config import settings
 
 logger = logging.getLogger(__name__)
 
 # ── SQLAlchemy Setup ──────────────────────────────────────────────────────────
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://user:password@localhost:5432/chatbot_db")
+DATABASE_URL = settings.DATABASE_URL
 
 # Create async engine
 engine: AsyncEngine = create_async_engine(
     DATABASE_URL,
-    echo=os.getenv("DEBUG", "False").lower() == "true",
+    echo=settings.DEBUG,
     pool_pre_ping=True,
-    pool_size=10,
-    max_overflow=20,
+    **(
+        {}
+        if DATABASE_URL.startswith("sqlite")
+        else {"pool_size": 10, "max_overflow": 20}
+    ),
 )
 
 # Async session factory

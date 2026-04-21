@@ -1,0 +1,13 @@
+.git
+.claude
+**/__pycache__
+**/.pytest_cache
+**/.mypy_cache
+**/.venv
+**/node_modules
+**/dist
+**/temp_uploads
+**/qdrant_local_db
+**/*.pyc
+**/*.pyo
+**/*.log

@@ -1,32 +1,27 @@
-# ================================================
-# Stage 1: Builder
-# ================================================
-FROM python:3.11-slim AS builder
-
-WORKDIR /build
-
-# تعديل المسار هنا ليشمل اسم المجلد
-COPY arabic-rag-chatbot/requirements.txt .
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
-
-# ================================================
-# Stage 2: Runtime
-# ================================================
-FROM python:3.11-slim AS runtime
+FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-# نسخ المكتبات من الـ builder
-COPY --from=builder /install /usr/local
+RUN corepack enable
 
-# نسخ الكود بالكامل من المجلد الصحيح
-COPY arabic-rag-chatbot/ .
+COPY query-prism-dash/package.json query-prism-dash/pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
 
-# إنشاء المستخدم والصلاحيات
-RUN useradd -m appuser && chown -R appuser:appuser /app
-USER appuser
+COPY query-prism-dash/ ./
+RUN pnpm run build
 
-EXPOSE 8501
+FROM nginx:1.27-alpine AS runtime
 
-# تشغيل ستريمليت
-CMD ["streamlit", "run", "app_streamlit.py", "--server.port=8501", "--server.address=0.0.0.0"]
+RUN apk add --no-cache gettext
+
+COPY query-prism-dash/deploy/nginx/default.conf.template /etc/nginx/templates/default.conf.template
+COPY query-prism-dash/deploy/docker-entrypoint.sh /docker-entrypoint.sh
+COPY --from=builder /app/dist /usr/share/nginx/html
+
+RUN chmod +x /docker-entrypoint.sh
+
+ENV BACKEND_UPSTREAM=http://backend:8000
+
+EXPOSE 8080
+
+ENTRYPOINT ["/docker-entrypoint.sh"]
