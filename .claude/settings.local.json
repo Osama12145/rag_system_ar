@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run *)",
+      "Bash(python -m py_compile api_server.py rag_pipeline.py vector_store.py document_processor.py config.py)",
+      "Bash(python -m venv venv)",
+      "Bash(./venv/Scripts/activate)",
+      "Bash(pip install *)",
+      "Bash(python -m uvicorn api_server:app --host 0.0.0.0 --port 8000)",
+      "Bash(curl -s http://localhost:8000/)",
+      "Bash(curl -s http://localhost:8000/health)",
+      "Bash(curl -s http://localhost:8000/api/documents)",
+      "Bash(curl -s http://localhost:8000/api/documents/stats)",
+      "Bash(curl -s http://localhost:8000/api/sessions)",
+      "Bash(curl -s http://localhost:8000/api/usage)",
+      "Bash(curl *)",
+      "Bash(taskkill /F /IM python.exe)",
+      "Bash(taskkill //F //IM python.exe)",
+      "Bash(pnpm run *)",
+      "Bash(pnpm exec *)",
+      "Bash(python -c ' *)",
+      "Bash(python *)",
+      "Bash(sed -i '135s/Any\\\\]\\\\]\\\\]/Any]]/' /c/cloadeCode/arabic-rag-chatbot/api_server.py)",
+      "Bash(sed -n '135p' /c/cloadeCode/arabic-rag-chatbot/api_server.py)",
+      "Bash(git -C /c/cloadeCode/arabic-rag-chatbot diff api_server.py)",
+      "Bash(git -C /c/cloadeCode/arabic-rag-chatbot show HEAD:api_server.py)",
+      "Bash(python3 *)",
+      "Bash(/c/cloadeCode/arabic-rag-chatbot/venv/Scripts/python.exe *)",
+      "Bash(sed -i '135s/Any\\\\]\\\\] = None/Any]]] = None/' api_server.py)",
+      "Bash(sed -n '135p' api_server.py)",
+      "Bash(venv/Scripts/python.exe *)"
+    ]
+  }
+}

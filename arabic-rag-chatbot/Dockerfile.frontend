@@ -1,0 +1,52 @@
+# ================================================
+# Dockerfile.frontend — Streamlit Application
+# ================================================
+# Multi-stage build for production deployment
+# ================================================
+
+FROM python:3.11-slim AS builder
+
+# No system build tools needed for Streamlit (pure Python packages)
+RUN useradd --create-home --shell /bin/bash appuser
+
+WORKDIR /app
+
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir --user -r requirements.txt
+
+
+# ================================================
+# Runtime image
+# ================================================
+FROM python:3.11-slim AS runtime
+
+# Copy installed packages
+COPY --from=builder /root/.local /root/.local
+
+# Copy application code
+WORKDIR /app
+COPY . .
+
+# Ensure scripts in .local are in PATH
+ENV PATH=/root/.local/bin:$PATH
+
+# Create non-root user
+RUN useradd --create-home --shell /bin/bash appuser && \
+    chown -R appuser:appuser /app
+USER appuser
+
+# Expose Streamlit default port
+EXPOSE 8501
+
+# Health check (optional)
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health').read()" || exit 1
+
+# Run Streamlit
+CMD ["streamlit", "run", "app_streamlit.py", \
+    "--server.port=8501", \
+    "--server.address=0.0.0.0", \
+    "--server.headless=true", \
+    "--server.enableCORS=false", \
+    "--server.enableXsrfProtection=false"]
