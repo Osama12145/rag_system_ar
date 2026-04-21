@@ -5,8 +5,8 @@ FROM python:3.11-slim AS builder
 
 WORKDIR /build
 
-# تثبيت المتطلبات في مجلد منفصل
-COPY requirements.txt .
+# تعديل المسار هنا ليشمل اسم المجلد
+COPY arabic-rag-chatbot/requirements.txt .
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 # ================================================
@@ -16,25 +16,17 @@ FROM python:3.11-slim AS runtime
 
 WORKDIR /app
 
-# نسخ المكتبات الجاهزة لمسار النظام الافتراضي
+# نسخ المكتبات من الـ builder
 COPY --from=builder /install /usr/local
 
-# نسخ كود الفرونت أند (تأكد أنك داخل مجلد query-prism-dash)
-COPY . .
+# نسخ الكود بالكامل من المجلد الصحيح
+COPY arabic-rag-chatbot/ .
 
-# إنشاء مستخدم غير جذر (أمان أكثر)
+# إنشاء المستخدم والصلاحيات
 RUN useradd -m appuser && chown -R appuser:appuser /app
 USER appuser
 
-# بورت ستريمليت المعروف
 EXPOSE 8501
 
-# الهيلث تشيك الخاص بـ Streamlit
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health').read()" || exit 1
-
-# تشغيل التطبيق
-CMD ["streamlit", "run", "app_streamlit.py", \
-     "--server.port=8501", \
-     "--server.address=0.0.0.0", \
-     "--server.headless=true"]
+# تشغيل ستريمليت
+CMD ["streamlit", "run", "app_streamlit.py", "--server.port=8501", "--server.address=0.0.0.0"]
