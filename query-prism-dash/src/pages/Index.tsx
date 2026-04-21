@@ -16,6 +16,14 @@ type Msg = {
   streaming?: boolean;
 };
 
+function generateSessionId() {
+  if (typeof globalThis.crypto?.randomUUID === "function") {
+    return `session-${globalThis.crypto.randomUUID()}`;
+  }
+
+  return `session-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 const Dashboard = () => {
   const { t, lang } = useI18n();
   const [input, setInput] = useState("");
@@ -27,7 +35,7 @@ const Dashboard = () => {
   const [sessionId] = useState(() => {
     const existing = window.localStorage.getItem("os-ai-session-id");
     if (existing) return existing;
-    const created = `session-${crypto.randomUUID()}`;
+    const created = generateSessionId();
     window.localStorage.setItem("os-ai-session-id", created);
     return created;
   });
