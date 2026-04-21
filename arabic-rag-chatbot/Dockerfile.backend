@@ -1,54 +1,44 @@
 # ================================================
-# Dockerfile.backend — FastAPI Application
+# Stage 1: Builder
 # ================================================
-# Multi-stage build for production deployment
-# ================================================
-
 FROM python:3.11-slim AS builder
 
-# System dependencies for PostgreSQL (psycopg2/asyncpg) and building wheels
+# تثبيت أدوات البناء الضرورية
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libpq-dev \
     gcc \
     && rm -rf /var/lib/apt/lists/*
 
-# Create non-root user
-RUN useradd --create-home --shell /bin/bash appuser
+WORKDIR /build
 
-# Working directory
-WORKDIR /app
-
-# 1. انسخ ملف المتطلبات من داخل مجلد الباك أند
+# انسخ المتطلبات وثبتها في المسار الافتراضي (أسهل للنسخ لاحقاً)
 COPY arabic-rag-chatbot/requirements.txt .
-RUN pip install --no-cache-dir --user -r requirements.txt
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 # ================================================
-# Runtime image (النسخة النهائية الصغيره)
+# Stage 2: Runtime
 # ================================================
 FROM python:3.11-slim AS runtime
 
-# Copy installed packages from builder
-COPY --from=builder /root/.local /root/.local
+# تثبيت مكتبة الـ PostgreSQL الضرورية للتشغيل فقط
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 \
+    && rm -rf /var/lib/apt/lists/*
 
-# 2. انتبه هنا: لازم ننسخ كود الباك أند فقط
 WORKDIR /app
+
+# نسخ المكتبات من مرحلة البناء
+COPY --from=builder /install /usr/local
+
+# نسخ كود المشروع
 COPY arabic-rag-chatbot/ .
 
-# Ensure scripts in .local are usable
-ENV PATH=/root/.local/bin:$PATH
-
-# Create non-root user and set permissions
-RUN useradd --create-home --shell /bin/bash appuser && \
-    chown -R appuser:appuser /app
+# إنشاء مستخدم غير جذر للأمان (اختياري بس يفضل)
+RUN useradd -m appuser && chown -R appuser:appuser /app
 USER appuser
 
-# Expose FastAPI default port
 EXPOSE 8000
 
-# Health check (optional — Coolify may use its own)
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()" || exit 1
-
-# Run with uvicorn
+# تأكد إن اسم الملف api_server.py موجود فعلاً داخل المجلد
 CMD ["uvicorn", "api_server:app", "--host", "0.0.0.0", "--port", "8000"]
