@@ -4,9 +4,17 @@ vector_store.py - Qdrant Vector Database Manager
 
 from langchain_cohere import CohereEmbeddings
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct
+from qdrant_client.models import (
+    Distance,
+    FieldCondition,
+    Filter,
+    FilterSelector,
+    MatchValue,
+    PointStruct,
+    VectorParams,
+)
 from langchain_core.documents import Document
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 import logging
 import uuid
 from config import settings
@@ -106,7 +114,8 @@ class VectorStoreManager:
         self, 
         query: str, 
         top_k: int = None,
-        threshold: float = None
+        threshold: float = None,
+        user_id: Optional[str] = None,
     ) -> List[Tuple[Document, float]]:
         """
         Search for the most similar documents to a given query.
@@ -123,11 +132,22 @@ class VectorStoreManager:
             logger.info(f"Searching for: '{query}'")
             
             query_vector = self.embeddings.embed_query(query)
+            query_filter = None
+            if user_id:
+                query_filter = Filter(
+                    must=[
+                        FieldCondition(
+                            key="metadata.user_id",
+                            match=MatchValue(value=user_id),
+                        )
+                    ]
+                )
             
             results = self.client.query_points(
                 collection_name=self.collection_name, 
                 query=query_vector,
-                limit=top_k
+                limit=top_k,
+                query_filter=query_filter,
             )
             
             # Filter results by similarity threshold
@@ -159,6 +179,30 @@ class VectorStoreManager:
             return True
         except Exception as e:
             logger.error(f"Delete error: {e}")
+            return False
+
+    def delete_documents_for_user(self, user_id: str) -> bool:
+        """
+        Delete documents owned by a single user without affecting other users.
+        """
+        try:
+            self.client.delete(
+                collection_name=self.collection_name,
+                points_selector=FilterSelector(
+                    filter=Filter(
+                        must=[
+                            FieldCondition(
+                                key="metadata.user_id",
+                                match=MatchValue(value=user_id),
+                            )
+                        ]
+                    )
+                ),
+            )
+            logger.info("Deleted Qdrant documents for user %s", user_id)
+            return True
+        except Exception as e:
+            logger.error(f"Delete error for user {user_id}: {e}")
             return False
     
     def get_index_stats(self) -> dict:

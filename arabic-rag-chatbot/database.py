@@ -6,7 +6,7 @@ Provides async database connectivity with declarative models.
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
-from sqlalchemy import Column, String, Integer, DateTime, Text
+from sqlalchemy import Column, String, Integer, DateTime, Text, inspect, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
@@ -50,6 +50,7 @@ class FileMetadata(Base):
     __tablename__ = "file_metadata"
 
     file_id = Column(String, primary_key=True, index=True)
+    user_id = Column(String, nullable=False, default="anonymous", index=True)
     filename = Column(String, nullable=False, index=True)
     file_size = Column(Integer, nullable=False)  # bytes
     upload_date = Column(DateTime(timezone=True), nullable=False)
@@ -78,6 +79,7 @@ class ChatHistory(Base):
     __tablename__ = "chat_history"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String, nullable=False, default="anonymous", index=True)
     session_id = Column(String, nullable=False, index=True)
     user_message = Column(Text, nullable=False)
     ai_response = Column(Text, nullable=False)
@@ -111,6 +113,7 @@ async def init_db() -> None:
     """Create all tables if they don't exist (call at app startup)."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await _ensure_legacy_columns(conn)
     logger.info("Database tables initialized successfully")
 
 
@@ -118,3 +121,24 @@ async def close_db() -> None:
     """Dispose engine connections (call at app shutdown)."""
     await engine.dispose()
     logger.info("Database connections closed")
+
+
+async def _ensure_legacy_columns(conn) -> None:
+    """Add newer columns/indexes to legacy databases created before those fields existed."""
+
+    def has_column(sync_conn, table_name: str, column_name: str) -> bool:
+        inspector = inspect(sync_conn)
+        return column_name in {column["name"] for column in inspector.get_columns(table_name)}
+
+    if not await conn.run_sync(has_column, "file_metadata", "user_id"):
+        await conn.execute(
+            text("ALTER TABLE file_metadata ADD COLUMN user_id VARCHAR NOT NULL DEFAULT 'anonymous'")
+        )
+
+    if not await conn.run_sync(has_column, "chat_history", "user_id"):
+        await conn.execute(
+            text("ALTER TABLE chat_history ADD COLUMN user_id VARCHAR NOT NULL DEFAULT 'anonymous'")
+        )
+
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_file_metadata_user_id ON file_metadata (user_id)"))
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_chat_history_user_id ON chat_history (user_id)"))

@@ -28,7 +28,7 @@ export function MessageList({
           className={`flex w-full ${m.role === "user" ? "justify-end" : "justify-start"} animate-fade-in`}
         >
           <div
-            className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm leading-relaxed ${
+            className={`max-w-[92%] rounded-2xl px-4 py-3 text-sm leading-relaxed sm:max-w-[85%] ${
               m.role === "user"
                 ? "bg-gradient-primary text-primary-foreground shadow-glow-cyan"
                 : "glass-card text-foreground"

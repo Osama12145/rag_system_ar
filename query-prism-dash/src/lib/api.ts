@@ -47,6 +47,20 @@ export type Session = {
   messageCount: number;
 };
 
+export type HistoryMessage = {
+  role: "user" | "assistant";
+  content: string;
+  timestamp?: string;
+};
+
+export type StoredIdentity = {
+  id: string;
+  type: "guest" | "local";
+  name: string;
+  email?: string;
+  createdAt: string;
+};
+
 export type TokenUsage = {
   used: number;
   total: number;
@@ -60,6 +74,151 @@ type UploadResponse = {
   document?: DocumentRecord;
 };
 
+type ChatHistoryResponse = {
+  history: HistoryMessage[];
+  message_count: number;
+  session_id: string | null;
+};
+
+const LEGACY_USER_ID_STORAGE_KEY = "os-ai-user-id";
+const IDENTITIES_STORAGE_KEY = "os-ai-identities";
+const CURRENT_IDENTITY_STORAGE_KEY = "os-ai-current-identity-id";
+const ACTIVE_SESSION_STORAGE_KEY = "os-ai-active-session-id";
+
+function generateId(prefix: string) {
+  if (typeof globalThis.crypto?.randomUUID === "function") {
+    return `${prefix}-${globalThis.crypto.randomUUID()}`;
+  }
+
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function readStoredIdentities(): StoredIdentity[] {
+  try {
+    const raw = window.localStorage.getItem(IDENTITIES_STORAGE_KEY);
+    if (!raw) {
+      return [];
+    }
+    const parsed = JSON.parse(raw) as StoredIdentity[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeStoredIdentities(identities: StoredIdentity[]) {
+  window.localStorage.setItem(IDENTITIES_STORAGE_KEY, JSON.stringify(identities));
+}
+
+function ensureIdentityBootstrap(): StoredIdentity[] {
+  const existing = readStoredIdentities();
+  if (existing.length > 0) {
+    return existing;
+  }
+
+  const legacyUserId = window.localStorage.getItem(LEGACY_USER_ID_STORAGE_KEY);
+  const guestIdentity: StoredIdentity = {
+    id: legacyUserId || generateId("guest"),
+    type: "guest",
+    name: "Guest",
+    createdAt: new Date().toISOString(),
+  };
+
+  writeStoredIdentities([guestIdentity]);
+  window.localStorage.setItem(CURRENT_IDENTITY_STORAGE_KEY, guestIdentity.id);
+  if (legacyUserId) {
+    window.localStorage.removeItem(LEGACY_USER_ID_STORAGE_KEY);
+  }
+  return [guestIdentity];
+}
+
+export function listStoredIdentities(): StoredIdentity[] {
+  return ensureIdentityBootstrap();
+}
+
+export function getCurrentIdentity(): StoredIdentity {
+  const identities = ensureIdentityBootstrap();
+  const currentId = window.localStorage.getItem(CURRENT_IDENTITY_STORAGE_KEY);
+  const current = identities.find((identity) => identity.id === currentId);
+  if (current) {
+    return current;
+  }
+
+  const fallback = identities[0];
+  window.localStorage.setItem(CURRENT_IDENTITY_STORAGE_KEY, fallback.id);
+  return fallback;
+}
+
+export function switchIdentity(identityId: string) {
+  const identities = ensureIdentityBootstrap();
+  const target = identities.find((identity) => identity.id === identityId);
+  if (!target) {
+    throw new Error("Identity not found");
+  }
+  window.localStorage.setItem(CURRENT_IDENTITY_STORAGE_KEY, target.id);
+}
+
+export function upsertLocalIdentity(name: string, email: string): StoredIdentity {
+  const normalizedEmail = email.trim().toLowerCase();
+  if (!normalizedEmail) {
+    throw new Error("Email is required");
+  }
+
+  const identities = ensureIdentityBootstrap();
+  const existing = identities.find(
+    (identity) => identity.type === "local" && identity.email?.toLowerCase() === normalizedEmail,
+  );
+
+  const nextIdentity: StoredIdentity = existing
+    ? { ...existing, name: name.trim() || existing.name }
+    : {
+        id: `acct-${normalizedEmail.replace(/[^a-z0-9]+/g, "-") || generateId("acct")}`,
+        type: "local",
+        name: name.trim() || normalizedEmail.split("@")[0],
+        email: normalizedEmail,
+        createdAt: new Date().toISOString(),
+      };
+
+  const updated = existing
+    ? identities.map((identity) => (identity.id === existing.id ? nextIdentity : identity))
+    : [nextIdentity, ...identities];
+
+  writeStoredIdentities(updated);
+  window.localStorage.setItem(CURRENT_IDENTITY_STORAGE_KEY, nextIdentity.id);
+  return nextIdentity;
+}
+
+export function continueAsGuest() {
+  const identities = ensureIdentityBootstrap();
+  const guest = identities.find((identity) => identity.type === "guest");
+  if (!guest) {
+    throw new Error("Guest identity missing");
+  }
+  window.localStorage.setItem(CURRENT_IDENTITY_STORAGE_KEY, guest.id);
+}
+
+export function getCurrentUserId() {
+  return getCurrentIdentity().id;
+}
+
+export function createSessionId() {
+  return generateId("session");
+}
+
+export function getActiveSessionId() {
+  return window.localStorage.getItem(`${ACTIVE_SESSION_STORAGE_KEY}:${getCurrentUserId()}`);
+}
+
+export function setActiveSessionId(sessionId: string) {
+  window.localStorage.setItem(`${ACTIVE_SESSION_STORAGE_KEY}:${getCurrentUserId()}`, sessionId);
+}
+
+function withUserHeaders(init?: RequestInit): RequestInit {
+  const headers = new Headers(init?.headers);
+  headers.set("X-User-Id", getCurrentUserId());
+  return { ...init, headers };
+}
+
 async function fetchWithTimeout(
   input: RequestInfo | URL,
   init?: RequestInit,
@@ -68,7 +227,7 @@ async function fetchWithTimeout(
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), ms);
   try {
-    return await fetch(input, { ...init, signal: controller.signal });
+    return await fetch(input, { ...withUserHeaders(init), signal: controller.signal });
   } finally {
     window.clearTimeout(timer);
   }
@@ -137,24 +296,42 @@ export async function listSessions(): Promise<{
   }
 }
 
-function parseStreamPayload(payload: string): { text: string; citations: Citation[] } {
-  const marker = "[CITATIONS]";
-  const markerIndex = payload.indexOf(marker);
-  if (markerIndex === -1) {
-    return { text: payload, citations: [] };
-  }
-
-  const text = payload.slice(0, markerIndex);
-  const citationsPayload = payload.slice(markerIndex + marker.length).trim();
-  if (!citationsPayload) {
-    return { text, citations: [] };
-  }
-
+export async function getChatHistory(
+  sessionId?: string,
+): Promise<{
+  history: HistoryMessage[];
+  sessionId: string | null;
+  mocked: boolean;
+}> {
   try {
-    return { text, citations: JSON.parse(citationsPayload) as Citation[] };
+    const url = new URL(`${API_BASE}/api/chat/history`, window.location.origin);
+    if (sessionId) {
+      url.searchParams.set("session_id", sessionId);
+    }
+    const res = await fetchWithTimeout(url.toString());
+    const data = await parseJsonOrThrow<ChatHistoryResponse>(res);
+    return {
+      history: data.history ?? [],
+      sessionId: data.session_id,
+      mocked: false,
+    };
   } catch {
-    return { text, citations: [] };
+    return { history: [], sessionId: sessionId ?? null, mocked: true };
   }
+}
+
+export async function clearChatHistory(sessionId?: string): Promise<void> {
+  const url = new URL(`${API_BASE}/api/chat/clear`, window.location.origin);
+  if (sessionId) {
+    url.searchParams.set("session_id", sessionId);
+  }
+  await fetchWithTimeout(
+    url.toString(),
+    {
+      method: "POST",
+    },
+    10_000,
+  );
 }
 
 export async function* streamChat(
@@ -182,20 +359,55 @@ export async function* streamChat(
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
-  let payload = "";
+  const marker = "[CITATIONS]";
+  let textBuffer = "";
+  let citationsPayload = "";
+  let inCitations = false;
 
   while (true) {
     const { value, done } = await reader.read();
+    const chunkText = done ? decoder.decode() : decoder.decode(value, { stream: true });
+
+    if (inCitations) {
+      citationsPayload += chunkText;
+    } else {
+      textBuffer += chunkText;
+      const markerIndex = textBuffer.indexOf(marker);
+
+      if (markerIndex !== -1) {
+        const delta = textBuffer.slice(0, markerIndex);
+        if (delta) {
+          yield { delta };
+        }
+        citationsPayload += textBuffer.slice(markerIndex + marker.length);
+        textBuffer = "";
+        inCitations = true;
+      } else if (textBuffer.length > marker.length) {
+        const safeLength = textBuffer.length - marker.length;
+        const delta = textBuffer.slice(0, safeLength);
+        textBuffer = textBuffer.slice(safeLength);
+        if (delta) {
+          yield { delta };
+        }
+      }
+    }
+
     if (done) {
-      payload += decoder.decode();
       break;
     }
-    payload += decoder.decode(value, { stream: true });
   }
 
-  const { text, citations } = parseStreamPayload(payload);
-  if (text) {
-    yield { delta: text };
+  if (!inCitations && textBuffer) {
+    yield { delta: textBuffer };
+  }
+
+  let citations: Citation[] = [];
+  if (citationsPayload.trim()) {
+    try {
+      citations = JSON.parse(citationsPayload) as Citation[];
+    } catch {
+      citations = [];
+    }
   }
   yield { citations, done: true };
 }

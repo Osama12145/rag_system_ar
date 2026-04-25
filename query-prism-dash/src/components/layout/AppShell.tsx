@@ -14,8 +14,8 @@ export function AppShell({ children }: { children: ReactNode }) {
         <AppSidebar />
         <div className="flex min-h-screen flex-1 flex-col">
           <TopBar />
-          <main className="flex-1 px-6 pb-10 pt-6 md:px-10">{children}</main>
-          <footer className="px-6 py-4 text-center text-xs text-muted-foreground/70 md:px-10">
+          <main className="flex-1 px-4 pb-8 pt-4 md:px-10 md:pb-10 md:pt-6">{children}</main>
+          <footer className="px-4 py-4 text-center text-xs text-muted-foreground/70 md:px-10">
             © {new Date().getFullYear()} OS_AI · Enterprise RAG Platform
           </footer>
         </div>

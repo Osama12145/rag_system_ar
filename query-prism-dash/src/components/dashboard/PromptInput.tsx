@@ -12,10 +12,12 @@ type Props = {
   value: string;
   onChange: (v: string) => void;
   onSubmit: (text: string, opts: ChatOptions) => void;
+  onAttach?: () => void;
   busy?: boolean;
+  attachmentsBusy?: boolean;
 };
 
-export function PromptInput({ value, onChange, onSubmit, busy }: Props) {
+export function PromptInput({ value, onChange, onSubmit, onAttach, busy, attachmentsBusy }: Props) {
   const { t } = useI18n();
   const [mode, setMode] = useState<"sourceCheck" | "deepResearch" | "reasoning" | null>("sourceCheck");
   const taRef = useRef<HTMLTextAreaElement>(null);
@@ -117,10 +119,12 @@ export function PromptInput({ value, onChange, onSubmit, busy }: Props) {
         <div className="flex items-center gap-2">
           <button
             type="button"
+            onClick={onAttach}
+            disabled={attachmentsBusy}
             className="grid h-9 w-9 place-items-center rounded-full border border-border/60 bg-card/40 text-muted-foreground transition-colors hover:text-foreground"
             aria-label="Attach"
           >
-            <Paperclip className="h-4 w-4" />
+            <Paperclip className={`h-4 w-4 ${attachmentsBusy ? "animate-pulse" : ""}`} />
           </button>
           <button
             type="button"

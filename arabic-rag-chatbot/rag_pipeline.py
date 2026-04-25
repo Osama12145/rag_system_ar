@@ -64,10 +64,10 @@ class RAGChatbot:
         )
         logger.info("RAG Chatbot initialized")
 
-    def retrieve_context(self, query: str) -> Tuple[str, List[dict]]:
+    def retrieve_context(self, query: str, user_id: Optional[str] = None) -> Tuple[str, List[dict]]:
         """Retrieve relevant context from the document store."""
         logger.info("Searching for: %s", query[:80])
-        search_results = self.vs_manager.search_documents(query)
+        search_results = self.vs_manager.search_documents(query, user_id=user_id)
 
         if not search_results:
             logger.warning("No relevant documents found")
@@ -128,6 +128,7 @@ class RAGChatbot:
         include_sources: bool = True,
         language: str = "en",
         history: Optional[List[Dict[str, Any]]] = None,
+        user_id: Optional[str] = None,
         on_response_complete: Optional[Callable[[str], None]] = None,
     ) -> Generator[str, None, None]:
         """
@@ -136,7 +137,7 @@ class RAGChatbot:
         """
         logger.info("Stream query [%s]: %s", language, user_query[:80])
         try:
-            context, sources = self.retrieve_context(user_query)
+            context, sources = self.retrieve_context(user_query, user_id=user_id)
             messages = self.build_messages(user_query, context, language, history)
 
             full_response = ""
@@ -181,11 +182,12 @@ class RAGChatbot:
         include_sources: bool = True,
         language: str = "en",
         history: Optional[List[Dict[str, Any]]] = None,
+        user_id: Optional[str] = None,
     ) -> dict:
         """Synchronous chat that collects the full streamed response."""
         logger.info("Chat query [%s]: %s", language, user_query[:80])
         try:
-            context, sources = self.retrieve_context(user_query)
+            context, sources = self.retrieve_context(user_query, user_id=user_id)
             messages = self.build_messages(user_query, context, language, history)
             response = self.llm.invoke(messages)
             answer = response.content

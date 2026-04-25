@@ -12,7 +12,7 @@ import threading
 from typing import Any, Dict, List, Optional
 import uuid
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 vs_manager: Optional[VectorStoreManager] = None
 chatbot: Optional[RAGChatbot] = None
+DEFAULT_USER_ID = "anonymous"
 
 
 @asynccontextmanager
@@ -72,7 +73,7 @@ app.add_middleware(
     allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "DELETE"],
-    allow_headers=["Content-Type", "Authorization"],
+    allow_headers=["Content-Type", "Authorization", "X-User-Id"],
 )
 
 
@@ -130,14 +131,26 @@ class HealthResponse(BaseModel):
     db_connected: bool = False
 
 
-async def save_chat_message(session_id: str, user_message: str, ai_response: str):
-    """Persist a chat exchange."""
+def normalize_user_id(user_id: Optional[str]) -> str:
+    """Normalize user identity values coming from the frontend."""
+    value = (user_id or "").strip()
+    return value[:128] if value else DEFAULT_USER_ID
+
+
+async def save_chat_message_for_user(
+    session_id: str,
+    user_id: str,
+    user_message: str,
+    ai_response: str,
+):
+    """Persist a chat exchange for the current user."""
     if not user_message and not ai_response:
         return
     try:
         async with get_async_session() as session:
             session.add(
                 ChatHistory(
+                    user_id=user_id,
                     session_id=session_id,
                     user_message=user_message,
                     ai_response=ai_response,
@@ -149,18 +162,18 @@ async def save_chat_message(session_id: str, user_message: str, ai_response: str
         logger.error("Failed to save chat history: %s", e)
 
 
-def persist_chat_message(session_id: str, user_message: str, ai_response: str) -> None:
+def persist_chat_message(session_id: str, user_id: str, user_message: str, ai_response: str) -> None:
     """Persist chat history whether or not the current thread has a running event loop."""
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         thread = threading.Thread(
-            target=lambda: asyncio.run(save_chat_message(session_id, user_message, ai_response)),
+            target=lambda: asyncio.run(save_chat_message_for_user(session_id, user_id, user_message, ai_response)),
             daemon=True,
         )
         thread.start()
     else:
-        loop.create_task(save_chat_message(session_id, user_message, ai_response))
+        loop.create_task(save_chat_message_for_user(session_id, user_id, user_message, ai_response))
 
 
 def build_document_record(
@@ -215,13 +228,14 @@ async def health_check():
 
 
 @app.post("/api/chat")
-async def chat(request: ChatRequest):
+async def chat(request: ChatRequest, x_user_id: Optional[str] = Header(default=None, alias="X-User-Id")):
     """Stream a response from the chatbot."""
     if not chatbot:
         raise HTTPException(status_code=503, detail="Chatbot not initialized. Check API keys and vector store config.")
 
     try:
         user_message = request.message or (request.query or "").strip()
+        user_id = normalize_user_id(x_user_id)
         session_id = request.sessionId or str(uuid.uuid4())
         logger.info("New query [%s]: %s", request.language, user_message[:80])
 
@@ -230,7 +244,8 @@ async def chat(request: ChatRequest):
             include_sources=request.sourceCheck,
             language=request.language,
             history=request.history,
-            on_response_complete=lambda response: persist_chat_message(session_id, user_message, response),
+            user_id=user_id,
+            on_response_complete=lambda response: persist_chat_message(session_id, user_id, user_message, response),
         )
         return StreamingResponse(generator, media_type="text/plain")
     except Exception as e:
@@ -239,15 +254,28 @@ async def chat(request: ChatRequest):
 
 
 @app.get("/api/chat/history")
-async def get_chat_history(session_id: Optional[str] = None):
+async def get_chat_history(
+    session_id: Optional[str] = None,
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+):
     """Return persisted conversation history."""
     try:
+        user_id = normalize_user_id(x_user_id)
         async with get_async_session() as db:
             if session_id:
                 selected_session_id = session_id
             else:
                 sid_result = await db.execute(
-                    text("SELECT session_id FROM chat_history ORDER BY timestamp DESC LIMIT 1")
+                    text(
+                        """
+                        SELECT session_id
+                        FROM chat_history
+                        WHERE user_id = :uid
+                        ORDER BY timestamp DESC
+                        LIMIT 1
+                        """
+                    ),
+                    {"uid": user_id},
                 )
                 selected_session_id = sid_result.scalar_one_or_none()
                 if not selected_session_id:
@@ -258,11 +286,11 @@ async def get_chat_history(session_id: Optional[str] = None):
                     """
                     SELECT user_message, ai_response, timestamp
                     FROM chat_history
-                    WHERE session_id = :sid
+                    WHERE session_id = :sid AND user_id = :uid
                     ORDER BY timestamp ASC
                     """
                 ),
-                {"sid": selected_session_id},
+                {"sid": selected_session_id, "uid": user_id},
             )
             rows = result.fetchall()
 
@@ -283,21 +311,34 @@ async def get_chat_history(session_id: Optional[str] = None):
 
 
 @app.post("/api/chat/clear")
-async def clear_history(session_id: Optional[str] = None):
+async def clear_history(
+    session_id: Optional[str] = None,
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+):
     """Clear conversation history."""
     try:
+        user_id = normalize_user_id(x_user_id)
         async with get_async_session() as db:
             selected_session_id = session_id
             if not selected_session_id:
                 sid_result = await db.execute(
-                    text("SELECT session_id FROM chat_history ORDER BY timestamp DESC LIMIT 1")
+                    text(
+                        """
+                        SELECT session_id
+                        FROM chat_history
+                        WHERE user_id = :uid
+                        ORDER BY timestamp DESC
+                        LIMIT 1
+                        """
+                    ),
+                    {"uid": user_id},
                 )
                 selected_session_id = sid_result.scalar_one_or_none()
 
             if selected_session_id:
                 await db.execute(
-                    text("DELETE FROM chat_history WHERE session_id = :sid"),
-                    {"sid": selected_session_id},
+                    text("DELETE FROM chat_history WHERE session_id = :sid AND user_id = :uid"),
+                    {"sid": selected_session_id, "uid": user_id},
                 )
                 await db.commit()
 
@@ -311,9 +352,10 @@ async def clear_history(session_id: Optional[str] = None):
 
 
 @app.get("/api/sessions")
-async def list_sessions():
+async def list_sessions(x_user_id: Optional[str] = Header(default=None, alias="X-User-Id")):
     """Return distinct conversation sessions."""
     try:
+        user_id = normalize_user_id(x_user_id)
         async with get_async_session() as db:
             result = await db.execute(
                 text(
@@ -324,11 +366,13 @@ async def list_sessions():
                         COUNT(*) AS message_count,
                         MAX(user_message) AS preview_text
                     FROM chat_history
+                    WHERE user_id = :uid
                     GROUP BY session_id
                     ORDER BY updated_at DESC
                     LIMIT 20
                     """
-                )
+                ),
+                {"uid": user_id},
             )
             rows = result.fetchall()
 
@@ -349,18 +393,21 @@ async def list_sessions():
 
 
 @app.get("/api/documents", response_model=List[DocumentRecord])
-async def list_documents():
+async def list_documents(x_user_id: Optional[str] = Header(default=None, alias="X-User-Id")):
     """Return indexed documents from the metadata store."""
     try:
+        user_id = normalize_user_id(x_user_id)
         async with get_async_session() as db:
             result = await db.execute(
                 text(
                     """
                     SELECT file_id, filename, file_size, pages, chunks, upload_date, status
                     FROM file_metadata
+                    WHERE user_id = :uid
                     ORDER BY upload_date DESC
                     """
-                )
+                ),
+                {"uid": user_id},
             )
             rows = result.fetchall()
 
@@ -382,18 +429,24 @@ async def list_documents():
 
 
 @app.post("/api/documents/upload", response_model=DocumentUploadResponse)
-async def upload_documents(files: List[UploadFile] = File(...)):
+async def upload_documents(
+    files: List[UploadFile] = File(...),
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+):
     """Upload and index new documents."""
     if not vs_manager:
         raise HTTPException(status_code=503, detail="Vector Store not initialized")
 
     max_size_bytes = 50 * 1024 * 1024
-    temp_dir = Path("./temp_uploads")
-    temp_dir.mkdir(exist_ok=True)
+    user_id = normalize_user_id(x_user_id)
+    temp_root = Path("./temp_uploads") / user_id
+    temp_dir = temp_root / str(uuid.uuid4())
+    temp_dir.mkdir(parents=True, exist_ok=True)
 
     saved_files: List[Path] = []
     file_ids: List[str] = []
     file_sizes: Dict[str, int] = {}
+    file_ids_by_name: Dict[str, str] = {}
     upload_date = datetime.now(timezone.utc)
 
     try:
@@ -427,6 +480,7 @@ async def upload_documents(files: List[UploadFile] = File(...)):
                     session.add(
                         FileMetadata(
                             file_id=file_id,
+                            user_id=user_id,
                             filename=file.filename,
                             file_size=file_sizes[file_id],
                             upload_date=upload_date,
@@ -439,10 +493,17 @@ async def upload_documents(files: List[UploadFile] = File(...)):
                     await session.commit()
             except Exception as db_err:
                 logger.error("DB insert failed for %s: %s", file.filename, db_err)
+            file_ids_by_name[file.filename] = file_id
 
         processor = DocumentProcessor()
         documents = processor.process_documents(str(temp_dir))
         total_chunks = len(documents)
+
+        for doc in documents:
+            source_name = doc.metadata.get("source", "")
+            doc.metadata["user_id"] = user_id
+            if source_name in file_ids_by_name:
+                doc.metadata["file_id"] = file_ids_by_name[source_name]
 
         if documents and not vs_manager.add_documents_to_vectorstore(documents):
             raise RuntimeError("Failed to index uploaded documents into Qdrant.")
@@ -526,46 +587,54 @@ async def upload_documents(files: List[UploadFile] = File(...)):
                     file_path.unlink()
             except Exception as cleanup_err:
                 logger.warning("Failed to remove temp file %s: %s", file_path, cleanup_err)
+        try:
+            temp_dir.rmdir()
+        except Exception:
+            pass
 
 
 @app.get("/api/documents/stats")
-async def get_document_stats():
+async def get_document_stats(x_user_id: Optional[str] = Header(default=None, alias="X-User-Id")):
     """Get vector index and file statistics."""
     file_count = 0
     total_chunks = 0
     try:
+        user_id = normalize_user_id(x_user_id)
         async with get_async_session() as db:
-            result = await db.execute(text("SELECT COUNT(*), SUM(chunks) FROM file_metadata"))
+            result = await db.execute(
+                text("SELECT COUNT(*), SUM(chunks) FROM file_metadata WHERE user_id = :uid"),
+                {"uid": user_id},
+            )
             file_count, total_chunks = result.fetchone()
             file_count = file_count or 0
             total_chunks = total_chunks or 0
     except Exception as e:
         logger.error("DB stats error: %s", e)
 
-    vs_stats = vs_manager.get_index_stats() if vs_manager else {}
     return {
         "collection_name": settings.QDRANT_COLLECTION_NAME,
-        "total_chunks": vs_stats.get("total_vectors", 0),
+        "total_chunks": total_chunks,
         "indexed_files": file_count,
         "chunks_per_file": total_chunks,
     }
 
 
 @app.delete("/api/documents")
-async def clear_all_documents():
+async def clear_all_documents(x_user_id: Optional[str] = Header(default=None, alias="X-User-Id")):
     """Delete all documents from Qdrant and file metadata."""
     success_qdrant = False
     success_db = False
+    user_id = normalize_user_id(x_user_id)
 
     try:
         if vs_manager:
-            success_qdrant = vs_manager.delete_all_documents()
+            success_qdrant = vs_manager.delete_documents_for_user(user_id)
     except Exception as e:
         logger.error("Qdrant clear error: %s", e)
 
     try:
         async with get_async_session() as db:
-            await db.execute(text("DELETE FROM file_metadata"))
+            await db.execute(text("DELETE FROM file_metadata WHERE user_id = :uid"), {"uid": user_id})
             await db.commit()
         success_db = True
     except Exception as e:
@@ -579,13 +648,18 @@ async def clear_all_documents():
 
 
 @app.post("/api/search")
-async def search(query: str, top_k: int = 5):
+async def search(
+    query: str,
+    top_k: int = 5,
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+):
     """Search indexed documents directly via Qdrant."""
     if not vs_manager:
         raise HTTPException(status_code=503, detail="Vector Store not initialized")
 
     try:
-        results = vs_manager.search_documents(query, top_k=top_k)
+        user_id = normalize_user_id(x_user_id)
+        results = vs_manager.search_documents(query, top_k=top_k, user_id=user_id)
         return {
             "query": query,
             "results_count": len(results),
@@ -603,22 +677,23 @@ async def search(query: str, top_k: int = 5):
 
 
 @app.get("/api/usage")
-async def get_usage():
+async def get_usage(x_user_id: Optional[str] = Header(default=None, alias="X-User-Id")):
     """Return a rough usage estimate."""
-    qdrant_chunks = 0
-    if vs_manager:
-        try:
-            qdrant_chunks = vs_manager.get_index_stats().get("total_vectors", 0)
-        except Exception:
-            qdrant_chunks = 0
-
     db_files = 0
+    qdrant_chunks = 0
     try:
+        user_id = normalize_user_id(x_user_id)
         async with get_async_session() as db:
-            result = await db.execute(text("SELECT COUNT(*) FROM file_metadata"))
-            db_files = result.scalar_one_or_none() or 0
+            result = await db.execute(
+                text("SELECT COUNT(*), SUM(chunks) FROM file_metadata WHERE user_id = :uid"),
+                {"uid": user_id},
+            )
+            db_files, qdrant_chunks = result.fetchone()
+            db_files = db_files or 0
+            qdrant_chunks = qdrant_chunks or 0
     except Exception:
         db_files = 0
+        qdrant_chunks = 0
 
     estimated_tokens = (qdrant_chunks + db_files) * 500
     return {

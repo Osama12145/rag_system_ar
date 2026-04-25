@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { AppShell } from "@/components/layout/AppShell";
 import { useI18n } from "@/lib/i18n";
 import { DocumentRecord, listDocuments, uploadDocument } from "@/lib/api";
@@ -7,9 +8,14 @@ import { toast } from "sonner";
 
 const Library = () => {
   const { t, lang } = useI18n();
+  const [searchParams] = useSearchParams();
   const [docs, setDocs] = useState<DocumentRecord[]>([]);
   const [progress, setProgress] = useState<Record<string, number>>({});
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(searchParams.get("q") ?? "");
+
+  useEffect(() => {
+    setQuery(searchParams.get("q") ?? "");
+  }, [searchParams]);
 
   useEffect(() => {
     listDocuments().then(({ docs, mocked }) => {
@@ -64,7 +70,7 @@ const Library = () => {
   return (
     <AppShell>
       <div className="mx-auto w-full max-w-6xl">
-        <div className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
+        <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
           <div>
             <h1 className="text-3xl font-semibold tracking-tight text-foreground">{t("library_title")}</h1>
             <p className="mt-1 text-sm text-muted-foreground">{t("library_subtitle")}</p>
@@ -123,7 +129,7 @@ const Library = () => {
             const isIndexing = d.status === "indexing";
             const isError = d.status === "error";
             return (
-              <div key={d.id} className="glass-card flex items-center gap-4 rounded-xl p-4">
+              <div key={d.id} className="glass-card flex flex-col gap-3 rounded-xl p-4 sm:flex-row sm:items-center">
                 <div className={`grid h-11 w-11 shrink-0 place-items-center rounded-xl text-primary ${isError ? "bg-destructive/10 text-destructive" : "bg-primary/10"}`}>
                   <FileText className="h-5 w-5" />
                 </div>
