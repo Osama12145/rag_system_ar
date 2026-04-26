@@ -24,8 +24,9 @@ logger = logging.getLogger(__name__)
 
 # Vector dimension for Cohere embed-multilingual-v3.0
 VECTOR_SIZE = 1024
-EMBED_BATCH_SIZE = 50
-EMBED_MAX_RETRIES = 3
+EMBED_BATCH_SIZE = 20
+EMBED_MAX_RETRIES = 6
+EMBED_RATE_LIMIT_WAIT_SECONDS = 65
 
 
 class VectorStoreManager:
@@ -68,6 +69,13 @@ class VectorStoreManager:
                 collection_name=self.collection_name,
                 vectors_config=VectorParams(size=VECTOR_SIZE, distance=Distance.COSINE),
             )
+
+    def _get_embed_retry_wait_seconds(self, error: Exception, attempt: int) -> int:
+        """Return a conservative wait time for embedding retries."""
+        message = str(error).lower()
+        if "429" in message or "rate limit" in message or "tokens per minute" in message:
+            return EMBED_RATE_LIMIT_WAIT_SECONDS
+        return min(2 ** attempt, 30)
     
     def add_documents_to_vectorstore(self, documents: List[Document]) -> bool:
         """
@@ -97,7 +105,7 @@ class VectorStoreManager:
                     except Exception as e:
                         if attempt == EMBED_MAX_RETRIES - 1:
                             raise
-                        wait_seconds = 2 ** attempt
+                        wait_seconds = self._get_embed_retry_wait_seconds(e, attempt)
                         logger.warning(
                             "Embed attempt %s failed for batch %s/%s, retrying in %ss: %s",
                             attempt + 1,

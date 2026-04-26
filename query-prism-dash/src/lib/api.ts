@@ -84,6 +84,7 @@ const LEGACY_USER_ID_STORAGE_KEY = "os-ai-user-id";
 const IDENTITIES_STORAGE_KEY = "os-ai-identities";
 const CURRENT_IDENTITY_STORAGE_KEY = "os-ai-current-identity-id";
 const ACTIVE_SESSION_STORAGE_KEY = "os-ai-active-session-id";
+const DOCUMENT_UPLOAD_TIMEOUT_MS = 10 * 60 * 1000;
 
 function generateId(prefix: string) {
   if (typeof globalThis.crypto?.randomUUID === "function") {
@@ -264,7 +265,7 @@ export async function uploadDocument(
   const res = await fetchWithTimeout(
     `${API_BASE}/api/documents/upload`,
     { method: "POST", body: formData },
-    30_000,
+    DOCUMENT_UPLOAD_TIMEOUT_MS,
   );
   const data = await parseJsonOrThrow<UploadResponse>(res);
   onProgress?.(100);
