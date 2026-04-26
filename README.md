@@ -95,3 +95,28 @@ LANGCHAIN_API_KEY=your-langsmith-api-key
 LANGCHAIN_PROJECT=company-intelligence-rag
 ```
 Langchain natively captures the `ChatOpenAI` and Qdrant chains and synchronizes them with your LangSmith web UI for performance debugging.
+
+## Migration Note (v1.3)
+After updating to the flattened Qdrant payload format, clear the old vector data and document metadata once before re-uploading files.
+
+```python
+import asyncio
+
+from sqlalchemy import text
+
+from database import AsyncSessionFactory
+from vector_store import VectorStoreManager
+
+
+async def clear_metadata():
+    async with AsyncSessionFactory() as session:
+        await session.execute(text("DELETE FROM file_metadata"))
+        await session.commit()
+
+
+vs = VectorStoreManager()
+vs.delete_all_documents()
+asyncio.run(clear_metadata())
+```
+
+Then re-upload all documents through the UI.

@@ -459,20 +459,24 @@ async def upload_documents(
                     detail=f"Only PDF, TXT, and DOCX files are accepted: {file.filename}",
                 )
 
-            content = await file.read()
-            if len(content) > max_size_bytes:
-                raise HTTPException(
-                    status_code=413,
-                    detail=f"File too large (max 50 MB): {file.filename}",
-                )
-
             file_id = str(uuid.uuid4())
             file_path = temp_dir / file.filename
             file_ids.append(file_id)
-            file_sizes[file_id] = len(content)
 
+            # Stream uploads to disk so large files never sit fully in RAM.
+            file_size = 0
             with open(file_path, "wb") as f:
-                f.write(content)
+                while chunk := await file.read(1024 * 1024):
+                    file_size += len(chunk)
+                    if file_size > max_size_bytes:
+                        file_path.unlink(missing_ok=True)
+                        raise HTTPException(
+                            status_code=413,
+                            detail=f"File too large (max 50 MB): {file.filename}",
+                        )
+                    f.write(chunk)
+
+            file_sizes[file_id] = file_size
             saved_files.append(file_path)
 
             try:

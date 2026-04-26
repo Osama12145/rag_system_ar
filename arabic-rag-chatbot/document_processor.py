@@ -3,17 +3,30 @@ document_processor.py - Document Processing Pipeline
 Handles loading, splitting, and cleaning documents for the RAG system.
 """
 
-from langchain_community.document_loaders import (
-    PyPDFLoader,
-    Docx2txtLoader,
-    TextLoader,
-)
+from langchain_community.document_loaders import Docx2txtLoader, PyPDFLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 from pathlib import Path
 from typing import List
+import io
 import logging
+import shutil
 from config import settings
+
+try:
+    import fitz  # pymupdf
+except ImportError:  # pragma: no cover - dependency added via requirements.txt
+    fitz = None
+
+try:
+    import pytesseract
+except ImportError:  # pragma: no cover - dependency added via requirements.txt
+    pytesseract = None
+
+try:
+    from PIL import Image
+except ImportError:  # pragma: no cover - dependency added via requirements.txt
+    Image = None
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +42,82 @@ class DocumentProcessor:
             chunk_overlap=settings.CHUNK_OVERLAP,
             separators=["\n\n", "\n", " ", ""]
         )
+
+    def _extract_text_with_ocr_fallback(self, file_path: Path) -> List[Document]:
+        """
+        Extract PDF text page by page and use OCR only when native extraction is nearly empty.
+        If OCR tooling is unavailable, continue with standard extraction instead of failing.
+        """
+        if fitz is None:
+            raise RuntimeError("PyMuPDF is not installed")
+
+        tesseract_binary = shutil.which("tesseract")
+        ocr_ready = bool(tesseract_binary and pytesseract is not None and Image is not None)
+
+        if tesseract_binary and pytesseract is not None:
+            pytesseract.pytesseract.tesseract_cmd = tesseract_binary
+        elif pytesseract is not None and Image is not None:
+            logger.warning(
+                "Tesseract binary not found; scanned PDF pages without extractable text may be skipped for %s",
+                file_path.name,
+            )
+        else:
+            logger.warning(
+                "OCR dependencies are incomplete; using standard PDF extraction only for %s",
+                file_path.name,
+            )
+
+        documents: List[Document] = []
+        pdf_document = fitz.open(file_path)
+        try:
+            for page_num, page in enumerate(pdf_document):
+                text = page.get_text().strip()
+
+                if len(text) >= 50:
+                    documents.append(
+                        Document(
+                            page_content=text,
+                            metadata={"source": file_path.name, "page": page_num},
+                        )
+                    )
+                    continue
+
+                if ocr_ready:
+                    logger.info("Page %s in %s has low extractable text, running OCR", page_num, file_path.name)
+                    try:
+                        pix = page.get_pixmap(dpi=300)
+                        img = Image.open(io.BytesIO(pix.tobytes("png")))
+                        ocr_text = pytesseract.image_to_string(img, lang="ara+eng").strip()
+                    except Exception as ocr_error:
+                        logger.warning("OCR failed on page %s in %s: %s", page_num, file_path.name, ocr_error)
+                        ocr_text = ""
+
+                    if ocr_text:
+                        documents.append(
+                            Document(
+                                page_content=ocr_text,
+                                metadata={"source": file_path.name, "page": page_num},
+                            )
+                        )
+                        continue
+
+                if text:
+                    documents.append(
+                        Document(
+                            page_content=text,
+                            metadata={"source": file_path.name, "page": page_num},
+                        )
+                    )
+                else:
+                    logger.warning(
+                        "Page %s in %s produced no extractable text and OCR did not add content",
+                        page_num,
+                        file_path.name,
+                    )
+        finally:
+            pdf_document.close()
+
+        return documents
         
     def load_documents(self, directory_path: str) -> List[Document]:
         """
@@ -43,11 +132,14 @@ class DocumentProcessor:
         # Load PDF files
         for pdf_file in path.glob("*.pdf"):
             try:
-                loader = PyPDFLoader(str(pdf_file))
-                docs = loader.load()
-                # Override source to just the filename (not full path)
-                for d in docs:
-                    d.metadata["source"] = pdf_file.name
+                if fitz is not None:
+                    docs = self._extract_text_with_ocr_fallback(pdf_file)
+                else:
+                    logger.warning("PyMuPDF unavailable, falling back to PyPDFLoader for %s", pdf_file.name)
+                    loader = PyPDFLoader(str(pdf_file))
+                    docs = loader.load()
+                    for d in docs:
+                        d.metadata["source"] = pdf_file.name
                 logger.info(f"Loaded: {pdf_file.name} ({len(docs)} pages)")
                 documents.extend(docs)
             except Exception as e:

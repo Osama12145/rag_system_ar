@@ -16,6 +16,7 @@ from qdrant_client.models import (
 from langchain_core.documents import Document
 from typing import List, Optional, Tuple
 import logging
+import time
 import uuid
 from config import settings
 
@@ -23,6 +24,8 @@ logger = logging.getLogger(__name__)
 
 # Vector dimension for Cohere embed-multilingual-v3.0
 VECTOR_SIZE = 1024
+EMBED_BATCH_SIZE = 50
+EMBED_MAX_RETRIES = 3
 
 
 class VectorStoreManager:
@@ -80,8 +83,30 @@ class VectorStoreManager:
             texts = [doc.page_content for doc in documents]
             metadatas = [doc.metadata for doc in documents]
             
-            # Generate embeddings via Cohere
-            vectors = self.embeddings.embed_documents(texts)
+            # Generate embeddings in smaller batches to reduce timeouts/rate-limit failures.
+            vectors = []
+            total_batches = (len(texts) + EMBED_BATCH_SIZE - 1) // EMBED_BATCH_SIZE
+            for batch_num, start in enumerate(range(0, len(texts), EMBED_BATCH_SIZE), start=1):
+                batch_texts = texts[start:start + EMBED_BATCH_SIZE]
+                for attempt in range(EMBED_MAX_RETRIES):
+                    try:
+                        batch_vectors = self.embeddings.embed_documents(batch_texts)
+                        vectors.extend(batch_vectors)
+                        logger.info("Embedded batch %s/%s", batch_num, total_batches)
+                        break
+                    except Exception as e:
+                        if attempt == EMBED_MAX_RETRIES - 1:
+                            raise
+                        wait_seconds = 2 ** attempt
+                        logger.warning(
+                            "Embed attempt %s failed for batch %s/%s, retrying in %ss: %s",
+                            attempt + 1,
+                            batch_num,
+                            total_batches,
+                            wait_seconds,
+                            e,
+                        )
+                        time.sleep(wait_seconds)
             
             # Build Qdrant points
             points = []
@@ -89,7 +114,11 @@ class VectorStoreManager:
                 point_id = str(uuid.uuid4())
                 payload = {
                     "page_content": text,
-                    "metadata": meta
+                    "source": meta.get("source", ""),
+                    "page": meta.get("page", 0),
+                    "user_id": meta.get("user_id", ""),
+                    "file_id": meta.get("file_id", ""),
+                    "chunk_index": meta.get("chunk_index", i),
                 }
                 points.append(PointStruct(id=point_id, vector=vector, payload=payload))
             
@@ -137,7 +166,7 @@ class VectorStoreManager:
                 query_filter = Filter(
                     must=[
                         FieldCondition(
-                            key="metadata.user_id",
+                            key="user_id",
                             match=MatchValue(value=user_id),
                         )
                     ]
@@ -157,7 +186,13 @@ class VectorStoreManager:
                 if score >= threshold:
                     doc = Document(
                         page_content=point.payload.get("page_content", ""),
-                        metadata=point.payload.get("metadata", {})
+                        metadata={
+                            "source": point.payload.get("source", ""),
+                            "page": point.payload.get("page", 0),
+                            "user_id": point.payload.get("user_id", ""),
+                            "file_id": point.payload.get("file_id", ""),
+                            "chunk_index": point.payload.get("chunk_index", 0),
+                        }
                     )
                     filtered_results.append((doc, score))
             
@@ -192,7 +227,7 @@ class VectorStoreManager:
                     filter=Filter(
                         must=[
                             FieldCondition(
-                                key="metadata.user_id",
+                                key="user_id",
                                 match=MatchValue(value=user_id),
                             )
                         ]
