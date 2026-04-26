@@ -6,10 +6,14 @@ Run with: uvicorn api_server:app --reload
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import asyncio
+from email.header import decode_header
 import logging
+import os
 from pathlib import Path
 import threading
 from typing import Any, Dict, List, Optional
+import unicodedata
+from urllib.parse import unquote
 import uuid
 
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
@@ -135,6 +139,29 @@ def normalize_user_id(user_id: Optional[str]) -> str:
     """Normalize user identity values coming from the frontend."""
     value = (user_id or "").strip()
     return value[:128] if value else DEFAULT_USER_ID
+
+
+def normalize_upload_filename(filename: Optional[str]) -> str:
+    """Decode common encoded filename formats and keep only a safe basename."""
+    raw_name = (filename or "").strip()
+    if not raw_name:
+        return ""
+
+    decoded_parts: List[str] = []
+    try:
+        for value, encoding in decode_header(raw_name):
+            if isinstance(value, bytes):
+                decoded_parts.append(value.decode(encoding or "utf-8", errors="replace"))
+            else:
+                decoded_parts.append(value)
+    except Exception:
+        decoded_parts = [raw_name]
+
+    decoded_name = "".join(decoded_parts)
+    decoded_name = unquote(decoded_name).replace("\x00", "")
+    basename = os.path.basename(decoded_name) or os.path.basename(raw_name)
+    safe_name = basename.replace("/", "_").replace("\\", "_").strip()
+    return unicodedata.normalize("NFC", safe_name)
 
 
 async def save_chat_message_for_user(
@@ -451,16 +478,17 @@ async def upload_documents(
 
     try:
         for file in files:
-            if not file.filename:
+            normalized_filename = normalize_upload_filename(file.filename)
+            if not normalized_filename:
                 raise HTTPException(status_code=400, detail="Each uploaded file must have a filename.")
-            if not any(file.filename.lower().endswith(ext) for ext in [".pdf", ".txt", ".docx"]):
+            if not any(normalized_filename.lower().endswith(ext) for ext in [".pdf", ".txt", ".docx"]):
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Only PDF, TXT, and DOCX files are accepted: {file.filename}",
+                    detail=f"Only PDF, TXT, and DOCX files are accepted: {normalized_filename}",
                 )
 
             file_id = str(uuid.uuid4())
-            file_path = temp_dir / file.filename
+            file_path = temp_dir / normalized_filename
             file_ids.append(file_id)
 
             # Stream uploads to disk so large files never sit fully in RAM.
@@ -469,11 +497,11 @@ async def upload_documents(
                 while chunk := await file.read(1024 * 1024):
                     file_size += len(chunk)
                     if file_size > max_size_bytes:
-                        file_path.unlink(missing_ok=True)
-                        raise HTTPException(
-                            status_code=413,
-                            detail=f"File too large (max 50 MB): {file.filename}",
-                        )
+                            file_path.unlink(missing_ok=True)
+                            raise HTTPException(
+                                status_code=413,
+                                detail=f"File too large (max 50 MB): {normalized_filename}",
+                            )
                     f.write(chunk)
 
             file_sizes[file_id] = file_size
@@ -485,7 +513,7 @@ async def upload_documents(
                         FileMetadata(
                             file_id=file_id,
                             user_id=user_id,
-                            filename=file.filename,
+                            filename=normalized_filename,
                             file_size=file_sizes[file_id],
                             upload_date=upload_date,
                             collection_name=settings.QDRANT_COLLECTION_NAME,
@@ -496,8 +524,8 @@ async def upload_documents(
                     )
                     await session.commit()
             except Exception as db_err:
-                logger.error("DB insert failed for %s: %s", file.filename, db_err)
-            file_ids_by_name[file.filename] = file_id
+                logger.error("DB insert failed for %s: %s", normalized_filename, db_err)
+            file_ids_by_name[normalized_filename] = file_id
 
         processor = DocumentProcessor()
         documents = processor.process_documents(str(temp_dir))
