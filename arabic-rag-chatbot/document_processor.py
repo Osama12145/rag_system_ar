@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import List
 import io
 import logging
+import re
 import shutil
 from config import settings
 
@@ -24,9 +25,10 @@ except ImportError:  # pragma: no cover - dependency added via requirements.txt
     pytesseract = None
 
 try:
-    from PIL import Image
+    from PIL import Image, ImageOps
 except ImportError:  # pragma: no cover - dependency added via requirements.txt
     Image = None
+    ImageOps = None
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +45,48 @@ class DocumentProcessor:
             separators=["\n\n", "\n", " ", ""]
         )
 
+    def _score_ocr_text(self, text: str) -> int:
+        """Prefer OCR output that contains more real words and fewer noisy symbols."""
+        compact_text = " ".join(text.split())
+        if not compact_text:
+            return 0
+
+        word_count = sum(1 for word in re.findall(r"\w+", compact_text, flags=re.UNICODE) if len(word) >= 3)
+        alpha_numeric_count = sum(1 for char in compact_text if char.isalnum())
+        noisy_symbol_count = sum(1 for char in compact_text if char in "@#%^*_=`~|<>")
+        return (word_count * 10) + alpha_numeric_count - (noisy_symbol_count * 3)
+
+    def _extract_ocr_text(self, page, file_name: str) -> str:
+        """Try multiple OCR passes and keep the most text-like result."""
+        pix = page.get_pixmap(dpi=400)
+        base_image = Image.open(io.BytesIO(pix.tobytes("png"))).convert("L")
+        enhanced_image = ImageOps.autocontrast(base_image)
+        threshold_image = enhanced_image.point(lambda px: 255 if px > 160 else 0)
+
+        best_text = ""
+        best_score = 0
+        variants = [
+            ("enhanced", enhanced_image),
+            ("threshold", threshold_image),
+            ("grayscale", base_image),
+        ]
+        language_candidates = ["ara+eng", "eng", "ara"]
+
+        for lang in language_candidates:
+            for variant_name, image in variants:
+                try:
+                    candidate_text = pytesseract.image_to_string(image, lang=lang, config="--psm 6").strip()
+                except Exception as ocr_error:
+                    logger.debug("OCR attempt failed for %s using %s/%s: %s", file_name, lang, variant_name, ocr_error)
+                    continue
+
+                candidate_score = self._score_ocr_text(candidate_text)
+                if candidate_score > best_score:
+                    best_text = candidate_text
+                    best_score = candidate_score
+
+        return best_text
+
     def _extract_text_with_ocr_fallback(self, file_path: Path) -> List[Document]:
         """
         Extract PDF text page by page and use OCR only when native extraction is nearly empty.
@@ -52,7 +96,7 @@ class DocumentProcessor:
             raise RuntimeError("PyMuPDF is not installed")
 
         tesseract_binary = shutil.which("tesseract")
-        ocr_ready = bool(tesseract_binary and pytesseract is not None and Image is not None)
+        ocr_ready = bool(tesseract_binary and pytesseract is not None and Image is not None and ImageOps is not None)
 
         if tesseract_binary and pytesseract is not None:
             pytesseract.pytesseract.tesseract_cmd = tesseract_binary
@@ -85,9 +129,7 @@ class DocumentProcessor:
                 if ocr_ready:
                     logger.info("Page %s in %s has low extractable text, running OCR", page_num, file_path.name)
                     try:
-                        pix = page.get_pixmap(dpi=300)
-                        img = Image.open(io.BytesIO(pix.tobytes("png")))
-                        ocr_text = pytesseract.image_to_string(img, lang="ara+eng").strip()
+                        ocr_text = self._extract_ocr_text(page, file_path.name)
                     except Exception as ocr_error:
                         logger.warning("OCR failed on page %s in %s: %s", page_num, file_path.name, ocr_error)
                         ocr_text = ""
