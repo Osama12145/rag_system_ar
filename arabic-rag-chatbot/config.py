@@ -39,17 +39,25 @@ class Settings(BaseSettings):
     RESTORE_CHAT_HISTORY_ON_STARTUP: bool = False
 
     # LLM Configuration
-    LLM_MODEL: str = "cohere/command-r-plus-08-2024"
-    TEMPERATURE: float = 0.7
+    LLM_MODEL: str = "openai/gpt-oss-120b"
+    TEMPERATURE: float = 0.1
     MAX_TOKENS: int = 1500
 
     # RAG Configuration
     TOP_K_DOCUMENTS: int = 5
-    SIMILARITY_THRESHOLD: float = 0.1
+    SIMILARITY_THRESHOLD: float = 0.2
 
     # Chunking Strategy
-    CHUNK_SIZE: int = 1000
-    CHUNK_OVERLAP: int = 200
+    CHUNK_SIZE: int = 1200
+    CHUNK_OVERLAP: int = 150
+
+    # OCR Configuration
+    OCR_PROVIDER: str = "excai"
+    EXCAI_OCR_API_KEY: Optional[str] = None
+    EXCAI_OCR_BASE_URL: str = "https://api-ocr.excai.ai/api/v1"
+    EXCAI_OCR_TIMEOUT_SECONDS: int = 180
+    OCR_REMOTE_SCANNED_RATIO_THRESHOLD: float = 0.5
+    OCR_REMOTE_MIN_NATIVE_CHARS: int = 400
 
     # System Prompt (base — language is injected at request time)
     SYSTEM_PROMPT: str = (

@@ -7,10 +7,12 @@ from langchain_community.document_loaders import Docx2txtLoader, PyPDFLoader, Te
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 from pathlib import Path
-from typing import List
+from typing import Any, List, Tuple
 import io
 import logging
 import re
+import mimetypes
+import requests
 import shutil
 from config import settings
 
@@ -44,6 +46,9 @@ class DocumentProcessor:
             chunk_overlap=settings.CHUNK_OVERLAP,
             separators=["\n\n", "\n", " ", ""]
         )
+
+    def _use_remote_ocr(self) -> bool:
+        return settings.OCR_PROVIDER.lower() == "excai" and bool(settings.EXCAI_OCR_API_KEY)
 
     def _score_ocr_text(self, text: str) -> int:
         """Prefer OCR output that contains more real words and fewer noisy symbols."""
@@ -87,6 +92,50 @@ class DocumentProcessor:
 
         return best_text
 
+    def _extract_text_with_excai_ocr(self, file_path: Path) -> List[Document]:
+        """Use the external ExcAI OCR service for scanned-heavy documents."""
+        if not self._use_remote_ocr():
+            return []
+
+        endpoint = f"{settings.EXCAI_OCR_BASE_URL.rstrip('/')}/ocr/extract"
+        content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+
+        with file_path.open("rb") as file_handle:
+            response = requests.post(
+                endpoint,
+                headers={"X-API-Key": settings.EXCAI_OCR_API_KEY or ""},
+                files={"file": (file_path.name, file_handle, content_type)},
+                timeout=settings.EXCAI_OCR_TIMEOUT_SECONDS,
+            )
+
+        response.raise_for_status()
+        payload = response.json()
+        extracted_text = (payload.get("text") or "").strip()
+        if not extracted_text:
+            return []
+
+        page_count = int(payload.get("pagesCount") or 1)
+        page_chunks = [part.strip() for part in re.split(r"\f+", extracted_text) if part.strip()]
+        if not page_chunks:
+            page_chunks = [extracted_text]
+
+        if len(page_chunks) == 1 and page_count > 1:
+            logger.info("ExcAI OCR returned combined text for %s across %s page(s)", file_path.name, page_count)
+            return [
+                Document(
+                    page_content=page_chunks[0],
+                    metadata={"source": file_path.name, "page": 0},
+                )
+            ]
+
+        return [
+            Document(
+                page_content=text,
+                metadata={"source": file_path.name, "page": page_num},
+            )
+            for page_num, text in enumerate(page_chunks)
+        ]
+
     def _extract_text_with_ocr_fallback(self, file_path: Path) -> List[Document]:
         """
         Extract PDF text page by page and use OCR only when native extraction is nearly empty.
@@ -100,6 +149,8 @@ class DocumentProcessor:
 
         if tesseract_binary and pytesseract is not None:
             pytesseract.pytesseract.tesseract_cmd = tesseract_binary
+        elif self._use_remote_ocr():
+            logger.info("ExcAI OCR is configured; local Tesseract is optional for %s", file_path.name)
         elif pytesseract is not None and Image is not None:
             logger.warning(
                 "Tesseract binary not found; scanned PDF pages without extractable text may be skipped for %s",
@@ -114,10 +165,15 @@ class DocumentProcessor:
         documents: List[Document] = []
         pdf_document = fitz.open(file_path)
         try:
+            page_count = len(pdf_document)
+            scanned_candidates: List[Tuple[int, Any, str]] = []
+            total_native_chars = 0
+
             for page_num, page in enumerate(pdf_document):
                 text = page.get_text().strip()
 
                 if len(text) >= 50:
+                    total_native_chars += len(text)
                     documents.append(
                         Document(
                             page_content=text,
@@ -126,6 +182,34 @@ class DocumentProcessor:
                     )
                     continue
 
+                scanned_candidates.append((page_num, page, text))
+
+            scanned_ratio = (len(scanned_candidates) / page_count) if page_count else 0.0
+            should_use_remote_ocr = (
+                self._use_remote_ocr()
+                and scanned_candidates
+                and (
+                    scanned_ratio >= settings.OCR_REMOTE_SCANNED_RATIO_THRESHOLD
+                    or total_native_chars < settings.OCR_REMOTE_MIN_NATIVE_CHARS
+                )
+            )
+
+            if should_use_remote_ocr:
+                try:
+                    logger.info(
+                        "Document %s appears scanned-heavy (ratio=%.2f, native_chars=%s), using ExcAI OCR",
+                        file_path.name,
+                        scanned_ratio,
+                        total_native_chars,
+                    )
+                    remote_documents = self._extract_text_with_excai_ocr(file_path)
+                    if remote_documents:
+                        return remote_documents
+                    logger.warning("ExcAI OCR returned no text for %s, falling back to local OCR", file_path.name)
+                except Exception as remote_ocr_error:
+                    logger.warning("ExcAI OCR failed for %s: %s", file_path.name, remote_ocr_error)
+
+            for page_num, page, text in scanned_candidates:
                 if ocr_ready:
                     logger.info("Page %s in %s has low extractable text, running OCR", page_num, file_path.name)
                     try:
