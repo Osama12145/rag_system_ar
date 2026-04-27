@@ -11,7 +11,6 @@ import logging
 import os
 from pathlib import Path
 import re
-import threading
 from typing import Any, Dict, List, Optional
 import unicodedata
 from urllib.parse import unquote
@@ -52,6 +51,19 @@ DOCUMENT_INVENTORY_PATTERNS = [
     "ما الوثائق",
     "وش الوثائق",
     "ايش الوثائق",
+]
+DOCUMENT_NAME_QUERY_PATTERNS = [
+    "file named",
+    "file name",
+    "document named",
+    "document name",
+    "هل عندك ملف",
+    "في عندك ملف",
+    "عندك ملف",
+    "ملف اسمه",
+    "اسم الملف",
+    "وثيقة اسمها",
+    "الوثيقة",
 ]
 
 
@@ -186,6 +198,19 @@ def normalize_upload_filename(filename: Optional[str]) -> str:
 def normalize_search_text(value: str) -> str:
     """Normalize user queries and filenames for loose matching."""
     lowered = unicodedata.normalize("NFC", (value or "").strip().lower())
+    translation_table = str.maketrans(
+        {
+            "أ": "ا",
+            "إ": "ا",
+            "آ": "ا",
+            "ٱ": "ا",
+            "ى": "ي",
+            "ئ": "ي",
+            "ؤ": "و",
+            "ة": "ه",
+        }
+    )
+    lowered = lowered.translate(translation_table)
     lowered = re.sub(r"[^\w\u0600-\u06FF.\- ]+", " ", lowered, flags=re.UNICODE)
     return " ".join(lowered.split())
 
@@ -226,8 +251,38 @@ async def find_matching_file_ids(user_id: str, user_query: str) -> List[str]:
             continue
         if stem and stem in normalized_query:
             matched_file_ids.append(file_id)
+            continue
+
+        stem_tokens = [token for token in stem.split() if len(token) >= 3]
+        if stem_tokens and any(token in normalized_query for token in stem_tokens):
+            matched_file_ids.append(file_id)
 
     return matched_file_ids
+
+
+def is_specific_file_query(query: str) -> bool:
+    normalized_query = normalize_search_text(query)
+    return any(pattern in normalized_query for pattern in DOCUMENT_NAME_QUERY_PATTERNS)
+
+
+async def build_specific_file_response(user_id: str, user_query: str, language: str) -> Optional[str]:
+    matched_file_ids = await find_matching_file_ids(user_id, user_query)
+    if not matched_file_ids:
+        return None
+
+    rows = await get_user_documents_for_collection(user_id)
+    matched_documents = [row for row in rows if row[0] in matched_file_ids]
+    if not matched_documents:
+        return None
+
+    document_lines = [
+        f"- {filename} ({pages or 0} pages, {chunks or 0} chunks, {status or 'ready'})"
+        for _file_id, filename, pages, chunks, status in matched_documents
+    ]
+
+    if language == "ar":
+        return "نعم، عندي هذه الملفات المطابقة:\n" + "\n".join(document_lines)
+    return "Yes, I have these matching documents:\n" + "\n".join(document_lines)
 
 
 async def build_document_inventory_response(user_id: str, language: str) -> str:
@@ -282,11 +337,7 @@ def persist_chat_message(session_id: str, user_id: str, user_message: str, ai_re
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
-        thread = threading.Thread(
-            target=lambda: asyncio.run(save_chat_message_for_user(session_id, user_id, user_message, ai_response)),
-            daemon=True,
-        )
-        thread.start()
+        asyncio.run(save_chat_message_for_user(session_id, user_id, user_message, ai_response))
     else:
         loop.create_task(save_chat_message_for_user(session_id, user_id, user_message, ai_response))
 
@@ -358,6 +409,15 @@ async def chat(request: ChatRequest, x_user_id: Optional[str] = Header(default=N
             inventory_response = await build_document_inventory_response(user_id, request.language)
             persist_chat_message(session_id, user_id, user_message, inventory_response)
             return StreamingResponse(stream_plain_text_response(inventory_response), media_type="text/plain")
+
+        if is_specific_file_query(user_message):
+            specific_file_response = await build_specific_file_response(user_id, user_message, request.language)
+            if specific_file_response:
+                persist_chat_message(session_id, user_id, user_message, specific_file_response)
+                return StreamingResponse(
+                    stream_plain_text_response(specific_file_response),
+                    media_type="text/plain",
+                )
 
         matched_file_ids = await find_matching_file_ids(user_id, user_message)
         generator = chatbot.stream_chat(
