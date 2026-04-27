@@ -9,6 +9,7 @@ from qdrant_client.models import (
     FieldCondition,
     Filter,
     FilterSelector,
+    MatchAny,
     MatchValue,
     PointStruct,
     VectorParams,
@@ -153,6 +154,7 @@ class VectorStoreManager:
         top_k: int = None,
         threshold: float = None,
         user_id: Optional[str] = None,
+        file_ids: Optional[List[str]] = None,
     ) -> List[Tuple[Document, float]]:
         """
         Search for the most similar documents to a given query.
@@ -169,16 +171,23 @@ class VectorStoreManager:
             logger.info(f"Searching for: '{query}'")
             
             query_vector = self.embeddings.embed_query(query)
-            query_filter = None
+            must_conditions = []
             if user_id:
-                query_filter = Filter(
-                    must=[
-                        FieldCondition(
-                            key="user_id",
-                            match=MatchValue(value=user_id),
-                        )
-                    ]
+                must_conditions.append(
+                    FieldCondition(
+                        key="user_id",
+                        match=MatchValue(value=user_id),
+                    )
                 )
+            if file_ids:
+                must_conditions.append(
+                    FieldCondition(
+                        key="file_id",
+                        match=MatchAny(any=file_ids),
+                    )
+                )
+
+            query_filter = Filter(must=must_conditions) if must_conditions else None
             
             results = self.client.query_points(
                 collection_name=self.collection_name, 

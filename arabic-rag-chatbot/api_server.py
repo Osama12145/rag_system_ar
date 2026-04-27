@@ -10,6 +10,7 @@ from email.header import decode_header
 import logging
 import os
 from pathlib import Path
+import re
 import threading
 from typing import Any, Dict, List, Optional
 import unicodedata
@@ -34,6 +35,24 @@ logger = logging.getLogger(__name__)
 vs_manager: Optional[VectorStoreManager] = None
 chatbot: Optional[RAGChatbot] = None
 DEFAULT_USER_ID = "anonymous"
+DOCUMENT_INVENTORY_PATTERNS = [
+    "what files do you have",
+    "what documents do you have",
+    "which files do you have",
+    "which documents do you have",
+    "list documents",
+    "list files",
+    "available documents",
+    "available files",
+    "ايش الملفات",
+    "ما الملفات",
+    "وش الملفات",
+    "الملفات الي عندك",
+    "الملفات اللي عندك",
+    "ما الوثائق",
+    "وش الوثائق",
+    "ايش الوثائق",
+]
 
 
 @asynccontextmanager
@@ -164,6 +183,75 @@ def normalize_upload_filename(filename: Optional[str]) -> str:
     return unicodedata.normalize("NFC", safe_name)
 
 
+def normalize_search_text(value: str) -> str:
+    """Normalize user queries and filenames for loose matching."""
+    lowered = unicodedata.normalize("NFC", (value or "").strip().lower())
+    lowered = re.sub(r"[^\w\u0600-\u06FF.\- ]+", " ", lowered, flags=re.UNICODE)
+    return " ".join(lowered.split())
+
+
+def is_document_inventory_query(query: str) -> bool:
+    normalized_query = normalize_search_text(query)
+    return any(pattern in normalized_query for pattern in DOCUMENT_INVENTORY_PATTERNS)
+
+
+async def get_user_documents_for_collection(user_id: str) -> List[tuple]:
+    async with get_async_session() as db:
+        result = await db.execute(
+            text(
+                """
+                SELECT file_id, filename, pages, chunks, status
+                FROM file_metadata
+                WHERE user_id = :uid
+                ORDER BY upload_date DESC
+                """
+            ),
+            {"uid": user_id},
+        )
+        return result.fetchall()
+
+
+async def find_matching_file_ids(user_id: str, user_query: str) -> List[str]:
+    normalized_query = normalize_search_text(user_query)
+    if not normalized_query:
+        return []
+
+    rows = await get_user_documents_for_collection(user_id)
+    matched_file_ids: List[str] = []
+    for file_id, filename, _pages, _chunks, _status in rows:
+        normalized_name = normalize_search_text(filename or "")
+        stem = normalize_search_text(Path(filename or "").stem)
+        if normalized_name and normalized_name in normalized_query:
+            matched_file_ids.append(file_id)
+            continue
+        if stem and stem in normalized_query:
+            matched_file_ids.append(file_id)
+
+    return matched_file_ids
+
+
+async def build_document_inventory_response(user_id: str, language: str) -> str:
+    rows = await get_user_documents_for_collection(user_id)
+    if not rows:
+        return (
+            "لا توجد ملفات مرفوعة حاليًا."
+            if language == "ar"
+            else "There are no uploaded documents right now."
+        )
+
+    document_lines = []
+    for _file_id, filename, pages, chunks, status in rows:
+        document_lines.append(f"- {filename} ({pages or 0} pages, {chunks or 0} chunks, {status or 'ready'})")
+
+    if language == "ar":
+        return "الملفات المتوفرة حاليًا هي:\n" + "\n".join(document_lines)
+    return "The currently available documents are:\n" + "\n".join(document_lines)
+
+
+def stream_plain_text_response(text_value: str):
+    yield text_value
+
+
 async def save_chat_message_for_user(
     session_id: str,
     user_id: str,
@@ -266,12 +354,19 @@ async def chat(request: ChatRequest, x_user_id: Optional[str] = Header(default=N
         session_id = request.sessionId or str(uuid.uuid4())
         logger.info("New query [%s]: %s", request.language, user_message[:80])
 
+        if is_document_inventory_query(user_message):
+            inventory_response = await build_document_inventory_response(user_id, request.language)
+            persist_chat_message(session_id, user_id, user_message, inventory_response)
+            return StreamingResponse(stream_plain_text_response(inventory_response), media_type="text/plain")
+
+        matched_file_ids = await find_matching_file_ids(user_id, user_message)
         generator = chatbot.stream_chat(
             user_query=user_message,
             include_sources=request.sourceCheck,
             language=request.language,
             history=request.history,
             user_id=user_id,
+            file_ids=matched_file_ids or None,
             on_response_complete=lambda response: persist_chat_message(session_id, user_id, user_message, response),
         )
         return StreamingResponse(generator, media_type="text/plain")

@@ -129,6 +129,7 @@ class RAGChatbot:
         language: str = "en",
         history: Optional[List[Dict[str, Any]]] = None,
         user_id: Optional[str] = None,
+        file_ids: Optional[List[str]] = None,
         on_response_complete: Optional[Callable[[str], None]] = None,
     ) -> Generator[str, None, None]:
         """
@@ -137,7 +138,7 @@ class RAGChatbot:
         """
         logger.info("Stream query [%s]: %s", language, user_query[:80])
         try:
-            context, sources = self.retrieve_context(user_query, user_id=user_id)
+            context, sources = self.retrieve_context_with_filters(user_query, user_id=user_id, file_ids=file_ids)
             messages = self.build_messages(user_query, context, language, history)
 
             full_response = ""
@@ -183,11 +184,12 @@ class RAGChatbot:
         language: str = "en",
         history: Optional[List[Dict[str, Any]]] = None,
         user_id: Optional[str] = None,
+        file_ids: Optional[List[str]] = None,
     ) -> dict:
         """Synchronous chat that collects the full streamed response."""
         logger.info("Chat query [%s]: %s", language, user_query[:80])
         try:
-            context, sources = self.retrieve_context(user_query, user_id=user_id)
+            context, sources = self.retrieve_context_with_filters(user_query, user_id=user_id, file_ids=file_ids)
             messages = self.build_messages(user_query, context, language, history)
             response = self.llm.invoke(messages)
             answer = response.content
@@ -213,3 +215,36 @@ class RAGChatbot:
     def get_conversation_summary(self) -> str:
         """Compatibility method retained for API callers."""
         return "Conversation history is managed per request."
+
+    def retrieve_context_with_filters(
+        self,
+        query: str,
+        user_id: Optional[str] = None,
+        file_ids: Optional[List[str]] = None,
+    ) -> Tuple[str, List[dict]]:
+        """Retrieve relevant context from the document store with optional file filtering."""
+        logger.info("Searching for: %s", query[:80])
+        search_results = self.vs_manager.search_documents(query, user_id=user_id, file_ids=file_ids)
+
+        if not search_results:
+            logger.warning("No relevant documents found")
+            return "", []
+
+        context_parts: List[str] = []
+        sources: List[dict] = []
+
+        for doc, score in search_results:
+            source_name = doc.metadata.get("source", "Unknown")
+            context_parts.append(f"[Source: {source_name}]\n{doc.page_content}")
+            sources.append(
+                {
+                    "source": source_name,
+                    "page": doc.metadata.get("page"),
+                    "score": float(score),
+                    "content_preview": doc.page_content[:150],
+                }
+            )
+
+        context = "\n---\n".join(context_parts)
+        logger.info("Found %s relevant documents", len(sources))
+        return context, sources
