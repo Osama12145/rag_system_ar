@@ -51,6 +51,11 @@ class Settings(BaseSettings):
     CHUNK_SIZE: int = 1200
     CHUNK_OVERLAP: int = 150
 
+    # File-targeted retrieval tuning
+    FILE_CONTEXT_LEAD_CHUNKS: int = 6
+    FILE_CONTEXT_TOP_K: int = 8
+    FILE_CONTEXT_MAX_CHARS: int = 18000
+
     # OCR Configuration
     OCR_PROVIDER: str = "excai"
     EXCAI_OCR_API_KEY: Optional[str] = None

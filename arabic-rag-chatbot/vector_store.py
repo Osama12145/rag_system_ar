@@ -219,6 +219,78 @@ class VectorStoreManager:
         except Exception as e:
             logger.error(f"Search error: {e}")
             return []
+
+    def get_documents_by_file_ids(
+        self,
+        *,
+        user_id: Optional[str] = None,
+        file_ids: Optional[List[str]] = None,
+        limit: Optional[int] = None,
+    ) -> List[Document]:
+        """Fetch stored document chunks directly for one or more files."""
+        if not file_ids:
+            return []
+
+        try:
+            must_conditions = [
+                FieldCondition(
+                    key="file_id",
+                    match=MatchAny(any=file_ids),
+                )
+            ]
+            if user_id:
+                must_conditions.append(
+                    FieldCondition(
+                        key="user_id",
+                        match=MatchValue(value=user_id),
+                    )
+                )
+
+            query_filter = Filter(must=must_conditions)
+            documents: List[Document] = []
+            offset = None
+
+            while True:
+                points, offset = self.client.scroll(
+                    collection_name=self.collection_name,
+                    scroll_filter=query_filter,
+                    limit=min(limit or 256, 256),
+                    with_payload=True,
+                    with_vectors=False,
+                    offset=offset,
+                )
+
+                for point in points:
+                    documents.append(
+                        Document(
+                            page_content=point.payload.get("page_content", ""),
+                            metadata={
+                                "source": point.payload.get("source", ""),
+                                "page": point.payload.get("page", 0),
+                                "user_id": point.payload.get("user_id", ""),
+                                "file_id": point.payload.get("file_id", ""),
+                                "chunk_index": point.payload.get("chunk_index", 0),
+                            },
+                        )
+                    )
+                    if limit and len(documents) >= limit:
+                        break
+
+                if (limit and len(documents) >= limit) or offset is None:
+                    break
+
+            documents.sort(
+                key=lambda doc: (
+                    str(doc.metadata.get("source", "")),
+                    int(doc.metadata.get("page") or 0),
+                    int(doc.metadata.get("chunk_index") or 0),
+                )
+            )
+            logger.info("Fetched %s chunks directly for file_ids=%s", len(documents), file_ids)
+            return documents
+        except Exception as e:
+            logger.error("Direct file fetch error: %s", e)
+            return []
     
     def delete_all_documents(self) -> bool:
         """

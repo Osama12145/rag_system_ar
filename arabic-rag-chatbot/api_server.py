@@ -65,6 +65,29 @@ DOCUMENT_NAME_QUERY_PATTERNS = [
     "وثيقة اسمها",
     "الوثيقة",
 ]
+FILE_CONTENT_QUERY_PATTERNS = [
+    "what is in the file",
+    "what is inside the file",
+    "what does the file talk about",
+    "what is this file about",
+    "summarize this file",
+    "summarise this file",
+    "file contents",
+    "document contents",
+    "what is inside",
+    "what does it talk about",
+    "ايش داخله",
+    "وش داخله",
+    "ماذا يحتوي",
+    "محتوى الملف",
+    "ملخص الملف",
+    "لخص الملف",
+    "ايش يتكلم عنه",
+    "وش يتكلم عنه",
+    "يتكلم عن ايش",
+    "يتكلم عنه",
+    "عن ايش",
+]
 
 
 @asynccontextmanager
@@ -265,6 +288,11 @@ def is_specific_file_query(query: str) -> bool:
     return any(pattern in normalized_query for pattern in DOCUMENT_NAME_QUERY_PATTERNS)
 
 
+def is_file_content_query(query: str) -> bool:
+    normalized_query = normalize_search_text(query)
+    return any(pattern in normalized_query for pattern in FILE_CONTENT_QUERY_PATTERNS)
+
+
 async def build_specific_file_response(user_id: str, user_query: str, language: str) -> Optional[str]:
     matched_file_ids = await find_matching_file_ids(user_id, user_query)
     if not matched_file_ids:
@@ -420,6 +448,7 @@ async def chat(request: ChatRequest, x_user_id: Optional[str] = Header(default=N
                 )
 
         matched_file_ids = await find_matching_file_ids(user_id, user_message)
+        prefer_full_file_context = bool(matched_file_ids and is_file_content_query(user_message))
         generator = chatbot.stream_chat(
             user_query=user_message,
             include_sources=request.sourceCheck,
@@ -427,6 +456,7 @@ async def chat(request: ChatRequest, x_user_id: Optional[str] = Header(default=N
             history=request.history,
             user_id=user_id,
             file_ids=matched_file_ids or None,
+            prefer_full_file_context=prefer_full_file_context,
             on_response_complete=lambda response: persist_chat_message(session_id, user_id, user_message, response),
         )
         return StreamingResponse(generator, media_type="text/plain")

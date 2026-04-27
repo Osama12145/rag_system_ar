@@ -72,23 +72,7 @@ class RAGChatbot:
         if not search_results:
             logger.warning("No relevant documents found")
             return "", []
-
-        context_parts: List[str] = []
-        sources: List[dict] = []
-
-        for doc, score in search_results:
-            source_name = doc.metadata.get("source", "Unknown")
-            context_parts.append(f"[Source: {source_name}]\n{doc.page_content}")
-            sources.append(
-                {
-                    "source": source_name,
-                    "page": doc.metadata.get("page"),
-                    "score": float(score),
-                    "content_preview": doc.page_content[:150],
-                }
-            )
-
-        context = "\n---\n".join(context_parts)
+        context, sources = self._build_context_from_results(search_results)
         logger.info("Found %s relevant documents", len(sources))
         return context, sources
 
@@ -130,6 +114,7 @@ class RAGChatbot:
         history: Optional[List[Dict[str, Any]]] = None,
         user_id: Optional[str] = None,
         file_ids: Optional[List[str]] = None,
+        prefer_full_file_context: bool = False,
         on_response_complete: Optional[Callable[[str], None]] = None,
     ) -> Generator[str, None, None]:
         """
@@ -138,7 +123,12 @@ class RAGChatbot:
         """
         logger.info("Stream query [%s]: %s", language, user_query[:80])
         try:
-            context, sources = self.retrieve_context_with_filters(user_query, user_id=user_id, file_ids=file_ids)
+            context, sources = self.retrieve_context_with_filters(
+                user_query,
+                user_id=user_id,
+                file_ids=file_ids,
+                prefer_full_file_context=prefer_full_file_context,
+            )
             messages = self.build_messages(user_query, context, language, history)
 
             full_response = ""
@@ -185,11 +175,17 @@ class RAGChatbot:
         history: Optional[List[Dict[str, Any]]] = None,
         user_id: Optional[str] = None,
         file_ids: Optional[List[str]] = None,
+        prefer_full_file_context: bool = False,
     ) -> dict:
         """Synchronous chat that collects the full streamed response."""
         logger.info("Chat query [%s]: %s", language, user_query[:80])
         try:
-            context, sources = self.retrieve_context_with_filters(user_query, user_id=user_id, file_ids=file_ids)
+            context, sources = self.retrieve_context_with_filters(
+                user_query,
+                user_id=user_id,
+                file_ids=file_ids,
+                prefer_full_file_context=prefer_full_file_context,
+            )
             messages = self.build_messages(user_query, context, language, history)
             response = self.llm.invoke(messages)
             answer = response.content
@@ -221,15 +217,93 @@ class RAGChatbot:
         query: str,
         user_id: Optional[str] = None,
         file_ids: Optional[List[str]] = None,
+        prefer_full_file_context: bool = False,
     ) -> Tuple[str, List[dict]]:
         """Retrieve relevant context from the document store with optional file filtering."""
         logger.info("Searching for: %s", query[:80])
+        if prefer_full_file_context and file_ids:
+            context, sources = self.retrieve_full_file_context(query, user_id=user_id, file_ids=file_ids)
+            if context:
+                logger.info("Using direct file context for %s matched file(s)", len(file_ids))
+                return context, sources
+
         search_results = self.vs_manager.search_documents(query, user_id=user_id, file_ids=file_ids)
 
         if not search_results:
             logger.warning("No relevant documents found")
             return "", []
 
+        context, sources = self._build_context_from_results(search_results)
+        logger.info("Found %s relevant documents", len(sources))
+        return context, sources
+
+    def retrieve_full_file_context(
+        self,
+        query: str,
+        user_id: Optional[str] = None,
+        file_ids: Optional[List[str]] = None,
+    ) -> Tuple[str, List[dict]]:
+        """Build context directly from the matched file, not just semantic top-k chunks."""
+        if not file_ids:
+            return "", []
+
+        direct_documents = self.vs_manager.get_documents_by_file_ids(user_id=user_id, file_ids=file_ids)
+        if not direct_documents:
+            return "", []
+
+        relevant_results = self.vs_manager.search_documents(
+            query,
+            top_k=max(settings.TOP_K_DOCUMENTS, settings.FILE_CONTEXT_TOP_K),
+            threshold=0.0,
+            user_id=user_id,
+            file_ids=file_ids,
+        )
+
+        merged_results: List[Tuple[Any, float]] = []
+        seen_keys = set()
+
+        def add_result(doc: Any, score: float) -> None:
+            doc_key = (
+                str(doc.metadata.get("file_id", "")),
+                int(doc.metadata.get("page") or 0),
+                int(doc.metadata.get("chunk_index") or 0),
+            )
+            if doc_key in seen_keys:
+                return
+            seen_keys.add(doc_key)
+            merged_results.append((doc, score))
+
+        for doc in direct_documents[: settings.FILE_CONTEXT_LEAD_CHUNKS]:
+            add_result(doc, 1.0)
+
+        for doc, score in relevant_results:
+            add_result(doc, float(score))
+
+        context_parts: List[str] = []
+        sources: List[dict] = []
+        current_chars = 0
+        for doc, score in merged_results:
+            source_name = doc.metadata.get("source", "Unknown")
+            part = f"[Source: {source_name} | Page: {doc.metadata.get('page', 0) + 1}]\n{doc.page_content}"
+            if context_parts and current_chars + len(part) > settings.FILE_CONTEXT_MAX_CHARS:
+                break
+            context_parts.append(part)
+            current_chars += len(part)
+            sources.append(
+                {
+                    "source": source_name,
+                    "page": doc.metadata.get("page"),
+                    "score": float(score),
+                    "content_preview": doc.page_content[:150],
+                }
+            )
+
+        if not context_parts:
+            return "", []
+
+        return "\n---\n".join(context_parts), sources
+
+    def _build_context_from_results(self, search_results: List[Tuple[Any, float]]) -> Tuple[str, List[dict]]:
         context_parts: List[str] = []
         sources: List[dict] = []
 
@@ -245,6 +319,4 @@ class RAGChatbot:
                 }
             )
 
-        context = "\n---\n".join(context_parts)
-        logger.info("Found %s relevant documents", len(sources))
-        return context, sources
+        return "\n---\n".join(context_parts), sources
