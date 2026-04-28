@@ -28,7 +28,9 @@ class Settings(BaseSettings):
     QDRANT_URL: str = "local"
     QDRANT_API_KEY: Optional[str] = None
     QDRANT_COLLECTION_NAME: str = "company-documents"
-    EMBEDDING_MODEL: str = "embed-multilingual-v3.0"
+    EMBEDDING_MODEL: str = "openai/text-embedding-3-small"
+    EMBEDDING_API_BASE: str = "https://openrouter.ai/api/v1"
+    EMBEDDING_DIMENSIONS: int = 1024
 
     # PostgreSQL Database (via asyncpg driver)
     # Format: postgresql+asyncpg://user:password@host:port/dbname

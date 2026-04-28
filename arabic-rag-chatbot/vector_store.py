@@ -2,7 +2,7 @@
 vector_store.py - Qdrant Vector Database Manager
 """
 
-from langchain_cohere import CohereEmbeddings
+from langchain_openai import OpenAIEmbeddings
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance,
@@ -23,8 +23,8 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
-# Vector dimension for Cohere embed-multilingual-v3.0
-VECTOR_SIZE = 1024
+# Vector dimension for the configured embedding model.
+VECTOR_SIZE = settings.EMBEDDING_DIMENSIONS
 EMBED_BATCH_SIZE = 20
 EMBED_MAX_RETRIES = 6
 EMBED_RATE_LIMIT_WAIT_SECONDS = 65
@@ -37,14 +37,16 @@ class VectorStoreManager:
     
     def __init__(self):
         """
-        Initialize Qdrant client and Cohere embeddings.
+        Initialize Qdrant client and embeddings.
         """
-        if not settings.COHERE_API_KEY:
-            raise ValueError("COHERE_API_KEY is required to initialize the vector store.")
+        if not settings.OPENROUTER_API_KEY:
+            raise ValueError("OPENROUTER_API_KEY is required to initialize the vector store.")
 
-        self.embeddings = CohereEmbeddings(
-            cohere_api_key=settings.COHERE_API_KEY,
-            model=settings.EMBEDDING_MODEL
+        self.embeddings = OpenAIEmbeddings(
+            model=settings.EMBEDDING_MODEL,
+            openai_api_key=settings.OPENROUTER_API_KEY,
+            openai_api_base=settings.EMBEDDING_API_BASE,
+            dimensions=settings.EMBEDDING_DIMENSIONS,
         )
         
         # Connect to Qdrant (local file-based or remote server)

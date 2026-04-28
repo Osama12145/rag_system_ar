@@ -4,8 +4,8 @@ A RAG (Retrieval-Augmented Generation) system that answers questions based solel
 
 ## Tech Stack
 
-- **LLM**: Cohere Command R+ via OpenRouter
-- **Embeddings**: Cohere `embed-multilingual-v3.0` (supports Arabic)
+- **LLM**: GPT OSS 120B via OpenRouter
+- **Embeddings**: OpenAI `text-embedding-3-small` via OpenRouter
 - **Vector Database**: Qdrant (local file-based or self-hosted)
 - **Framework**: LangChain + FastAPI + Streamlit
 
@@ -51,7 +51,6 @@ cp .env.example .env     # Linux/Mac
 Open `.env` and fill in your API keys:
 ```
 OPENROUTER_API_KEY=your_key_here
-COHERE_API_KEY=your_key_here
 ```
 
 **3. Run the Streamlit UI**
@@ -106,11 +105,11 @@ Key settings in `.env`:
 
 | Variable | Default | Description |
 |---|---|---|
-| `LLM_MODEL` | `cohere/command-r-plus-08-2024` | Model via OpenRouter |
-| `EMBEDDING_MODEL` | `embed-multilingual-v3.0` | Cohere embedding model |
+| `LLM_MODEL` | `openai/gpt-oss-120b` | Model via OpenRouter |
+| `EMBEDDING_MODEL` | `openai/text-embedding-3-small` | Embedding model via OpenRouter |
 | `QDRANT_URL` | `local` | `local` for file-based, or a remote URL |
 | `TOP_K_DOCUMENTS` | `5` | Number of chunks retrieved per query |
-| `SIMILARITY_THRESHOLD` | `0.1` | Minimum similarity score to include a result |
-| `CHUNK_SIZE` | `1000` | Characters per document chunk |
+| `SIMILARITY_THRESHOLD` | `0.2` | Minimum similarity score to include a result |
+| `CHUNK_SIZE` | `1200` | Characters per document chunk |
 
 

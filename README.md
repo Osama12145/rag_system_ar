@@ -12,7 +12,7 @@ The project consists of two core components residing in their respective directo
    - **Role**: Provides the user interface, manages chat sessions, handles multi-lingual switching (RTL/LTR), and parses streaming Langchain traces for rendering citations and metrics.
 
 2. **Backend (`arabic-rag-chatbot`)**
-   - **Stack**: Python 3, FastAPI, Langchain, Cohere Embeddings, OpenRouter (LLM), Qdrant.
+   - **Stack**: Python 3, FastAPI, Langchain, OpenAI `text-embedding-3-small` via OpenRouter, OpenRouter (LLM), Qdrant.
    - **Role**: Ingests document PDFs, generates embeddings, queries the Qdrant vector store, and provides an SSE endpoint that streams Langchain agent outputs.
    - **Observability**: Interfaced with LangSmith via `.env` configured `LANGCHAIN_*` environments.
 
@@ -96,8 +96,8 @@ LANGCHAIN_PROJECT=company-intelligence-rag
 ```
 Langchain natively captures the `ChatOpenAI` and Qdrant chains and synchronizes them with your LangSmith web UI for performance debugging.
 
-## Migration Note (v1.3)
-After updating to the flattened Qdrant payload format, clear the old vector data and document metadata once before re-uploading files.
+## Migration Note (v1.4)
+After switching the embedding model to `openai/text-embedding-3-small`, clear the old vector data and document metadata once before re-uploading files. Mixing older Cohere vectors with the new embedding space will hurt retrieval quality.
 
 ```python
 import asyncio

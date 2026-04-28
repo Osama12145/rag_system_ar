@@ -19,7 +19,6 @@ Required environment variables:
 
 ```env
 OPENROUTER_API_KEY=...
-COHERE_API_KEY=...
 QDRANT_URL=http://YOUR_QDRANT_INTERNAL_HOST:6333
 DATABASE_URL=postgresql+asyncpg://postgres:PASSWORD@YOUR_POSTGRES_INTERNAL_HOST:5432/postgres
 ALLOWED_ORIGINS=https://YOUR_FRONTEND_DOMAIN
@@ -51,7 +50,7 @@ BACKEND_UPSTREAM=http://YOUR_BACKEND_INTERNAL_HOST:8000
 Notes:
 
 - `BACKEND_UPSTREAM` must be the Coolify internal URL for the backend service.
-- The frontend container does not need `OPENROUTER_API_KEY`, `COHERE_API_KEY`, `QDRANT_URL`, or `DATABASE_URL`.
+- The frontend container does not need `OPENROUTER_API_KEY`, `QDRANT_URL`, or `DATABASE_URL`.
 - The React app uses same-origin requests, and Nginx proxies them to the backend.
 
 ## 3. Suggested Coolify Names
@@ -101,13 +100,14 @@ Set the backend `ALLOWED_ORIGINS` to your final frontend domain.
 Check:
 
 - `OPENROUTER_API_KEY`
-- `COHERE_API_KEY`
 - `LLM_MODEL`
+- `EMBEDDING_MODEL`
 
 The current default model is:
 
 ```env
-LLM_MODEL=cohere/command-r-plus-08-2024
+LLM_MODEL=openai/gpt-oss-120b
+EMBEDDING_MODEL=openai/text-embedding-3-small
 ```
 
 ## 6. Local Docker Smoke Test
