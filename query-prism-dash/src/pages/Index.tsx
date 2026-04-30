@@ -1,21 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 
-import { AppShell } from "@/components/layout/AppShell";
 import { CitationsPanel } from "@/components/dashboard/CitationsPanel";
 import { FeatureCards } from "@/components/dashboard/FeatureCards";
 import { MessageList } from "@/components/dashboard/MessageList";
 import { PromptInput, ChatOptions } from "@/components/dashboard/PromptInput";
+import { AppShell } from "@/components/layout/AppShell";
 import {
   Citation,
   clearChatHistory,
   createSessionId,
   getActiveSessionId,
-  getChatHistory,
   setActiveSessionId,
   streamChat,
   uploadDocument,
+  useHistoryQuery,
 } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 
@@ -27,9 +28,7 @@ type Msg = {
   streaming?: boolean;
 };
 
-function toUiMessages(
-  history: { role: "user" | "assistant"; content: string }[],
-): Msg[] {
+function toUiMessages(history: { role: "user" | "assistant"; content: string }[]): Msg[] {
   return history.map((item, index) => ({
     id: `${item.role}-${index}-${item.content.length}`,
     role: item.role,
@@ -39,6 +38,7 @@ function toUiMessages(
 
 const Dashboard = () => {
   const { t, lang } = useI18n();
+  const queryClient = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [searchParams] = useSearchParams();
   const requestedSessionId = searchParams.get("session")?.trim();
@@ -47,11 +47,11 @@ const Dashboard = () => {
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<Msg[]>([]);
   const [busy, setBusy] = useState(false);
-  const [historyLoading, setHistoryLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [panelOpen, setPanelOpen] = useState(false);
   const [activeCitation, setActiveCitation] = useState<Citation | null>(null);
   const [allCitations, setAllCitations] = useState<Citation[]>([]);
+  const historyQuery = useHistoryQuery(sessionId);
 
   useEffect(() => {
     const nextSessionId = requestedSessionId || getActiveSessionId() || createSessionId();
@@ -60,26 +60,21 @@ const Dashboard = () => {
   }, [requestedSessionId]);
 
   useEffect(() => {
-    let cancelled = false;
-    setHistoryLoading(true);
     setAllCitations([]);
     setActiveCitation(null);
+  }, [sessionId]);
 
-    getChatHistory(sessionId).then(({ history, mocked }) => {
-      if (cancelled) {
-        return;
-      }
-      setMessages(toUiMessages(history));
-      setHistoryLoading(false);
-      if (mocked) {
-        toast.message(t("error_disconnected"));
-      }
-    });
+  useEffect(() => {
+    if (historyQuery.data) {
+      setMessages(toUiMessages(historyQuery.data.history));
+    }
+  }, [historyQuery.data]);
 
-    return () => {
-      cancelled = true;
-    };
-  }, [sessionId, t]);
+  useEffect(() => {
+    if (historyQuery.error) {
+      toast.error(t("error_disconnected"));
+    }
+  }, [historyQuery.error, t]);
 
   const handleSubmit = useCallback(
     async (text: string, opts: ChatOptions) => {
@@ -97,7 +92,6 @@ const Dashboard = () => {
           .map((message) => ({ role: message.role, content: message.content }));
 
         let acc = "";
-        let mocked = false;
         let receivedCitations = false;
 
         for await (const chunk of streamChat({
@@ -116,18 +110,12 @@ const Dashboard = () => {
             receivedCitations = true;
             const citations = chunk.citations;
             setMessages((prev) =>
-              prev.map((message) =>
-                message.id === aId ? { ...message, citations, streaming: false } : message,
-              ),
+              prev.map((message) => (message.id === aId ? { ...message, citations, streaming: false } : message)),
             );
             setAllCitations((prev) => [...citations, ...prev]);
             if (citations.length > 0) {
               setPanelOpen(true);
             }
-          }
-
-          if (chunk.mocked) {
-            mocked = true;
           }
         }
 
@@ -135,9 +123,8 @@ const Dashboard = () => {
           setMessages((prev) => prev.map((message) => (message.id === aId ? { ...message, streaming: false } : message)));
         }
 
-        if (mocked) {
-          toast.message(t("error_disconnected"));
-        }
+        await queryClient.invalidateQueries({ queryKey: ["history"] });
+        await queryClient.invalidateQueries({ queryKey: ["sessions"] });
       } catch {
         toast.error(lang === "ar" ? "حدث خطأ أثناء إرسال الرسالة." : "Something went wrong while sending the message.");
         setMessages((prev) => prev.map((message) => (message.id === aId ? { ...message, streaming: false } : message)));
@@ -145,7 +132,7 @@ const Dashboard = () => {
         setBusy(false);
       }
     },
-    [lang, messages, sessionId, t],
+    [lang, messages, queryClient, sessionId],
   );
 
   const handleAttach = () => {
@@ -162,8 +149,11 @@ const Dashboard = () => {
       try {
         for (const file of Array.from(files)) {
           await uploadDocument(file);
+          await queryClient.invalidateQueries({ queryKey: ["documents"] });
           toast.success(
-            lang === "ar" ? `تم رفع ${file.name} ويمكنك السؤال عنه الآن.` : `${file.name} uploaded and ready for chat.`,
+            lang === "ar"
+              ? `تم رفع ${file.name} وبدأت معالجته.`
+              : `${file.name} uploaded and processing started.`,
           );
         }
       } catch (error: unknown) {
@@ -176,7 +166,7 @@ const Dashboard = () => {
         setUploading(false);
       }
     },
-    [lang],
+    [lang, queryClient],
   );
 
   const handleCitationClick = (citation: Citation) => {
@@ -187,6 +177,8 @@ const Dashboard = () => {
   const handleClearCurrentChat = useCallback(async () => {
     try {
       await clearChatHistory(sessionId);
+      await queryClient.invalidateQueries({ queryKey: ["history"] });
+      await queryClient.invalidateQueries({ queryKey: ["sessions"] });
       setMessages([]);
       setAllCitations([]);
       setActiveCitation(null);
@@ -194,7 +186,7 @@ const Dashboard = () => {
     } catch {
       toast.error(lang === "ar" ? "تعذر مسح المحادثة الحالية." : "Unable to clear the current chat.");
     }
-  }, [lang, sessionId]);
+  }, [lang, queryClient, sessionId]);
 
   return (
     <AppShell>
@@ -207,63 +199,72 @@ const Dashboard = () => {
         onChange={(event) => handleFilesSelected(event.target.files)}
       />
 
-      <div className={`mx-auto w-full max-w-4xl pb-40 ${panelOpen ? "md:pe-0" : ""}`}>
-        {historyLoading ? (
-          <div className="glass-card mt-6 rounded-2xl p-6 text-sm text-muted-foreground">
-            {lang === "ar" ? "جارٍ تحميل المحادثة..." : "Loading conversation..."}
-          </div>
-        ) : messages.length === 0 ? (
-          <div className="animate-fade-in pt-4 md:pt-8">
-            <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-              <div>
-                <h1 className="mt-2 text-3xl font-semibold tracking-tight text-foreground md:text-4xl">
-                  {t("greeting")}
-                </h1>
-                <p className="mt-2 text-base text-gradient md:text-xl">{t("greeting_sub")}</p>
+      <div className="mx-auto flex h-full w-full max-w-4xl flex-col">
+        <div className={`flex min-h-0 flex-1 flex-col ${panelOpen ? "md:pe-0" : ""}`}>
+          <div className="min-h-0 flex-1 overflow-y-auto px-1 pt-4 md:pt-6">
+            {historyQuery.isLoading ? (
+              <div className="glass-card rounded-2xl p-6 text-sm text-muted-foreground">
+                {lang === "ar" ? "جارٍ تحميل المحادثة..." : "Loading conversation..."}
               </div>
-              <button
-                type="button"
-                onClick={handleClearCurrentChat}
-                className="rounded-full border border-border/60 bg-card/50 px-4 py-2 text-sm text-muted-foreground transition-colors hover:text-foreground"
-              >
-                {lang === "ar" ? "بدء محادثة نظيفة" : "Reset current chat"}
-              </button>
-            </div>
+            ) : messages.length === 0 ? (
+              <div className="animate-fade-in pb-6">
+                <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                  <div>
+                    <h1 className="mt-2 text-3xl font-semibold tracking-tight text-foreground md:text-4xl">
+                      {t("greeting")}
+                    </h1>
+                    <p className="mt-2 text-base text-gradient md:text-xl">{t("greeting_sub")}</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleClearCurrentChat}
+                    className="rounded-full border border-border/60 bg-card/50 px-4 py-2 text-sm text-muted-foreground transition-colors hover:text-foreground"
+                  >
+                    {lang === "ar" ? "بدء محادثة نظيفة" : "Reset current chat"}
+                  </button>
+                </div>
 
-            <div className="mt-8">
-              <FeatureCards onPick={(prompt) => setInput(prompt)} />
-            </div>
+                <div className="mt-8">
+                  <FeatureCards onPick={(prompt) => setInput(prompt)} />
+                </div>
+              </div>
+            ) : (
+              <div className="flex min-h-full flex-col pb-6">
+                <div className="mb-4 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={handleClearCurrentChat}
+                    className="rounded-full border border-border/60 bg-card/50 px-4 py-2 text-xs text-muted-foreground transition-colors hover:text-foreground"
+                  >
+                    {lang === "ar" ? "مسح المحادثة الحالية" : "Clear current chat"}
+                  </button>
+                </div>
+                <MessageList messages={messages} onCitationClick={handleCitationClick} />
+              </div>
+            )}
           </div>
-        ) : (
-          <div className="pt-2 md:pt-4">
-            <div className="mb-4 flex justify-end">
-              <button
-                type="button"
-                onClick={handleClearCurrentChat}
-                className="rounded-full border border-border/60 bg-card/50 px-4 py-2 text-xs text-muted-foreground transition-colors hover:text-foreground"
-              >
-                {lang === "ar" ? "مسح المحادثة الحالية" : "Clear current chat"}
-              </button>
-            </div>
-            <MessageList messages={messages} onCitationClick={handleCitationClick} />
-          </div>
-        )}
-      </div>
 
-      <div className="fixed inset-x-0 bottom-0 z-20 px-3 pb-4 md:px-10 md:pb-6">
-        <div className={`mx-auto w-full max-w-4xl transition-all ${panelOpen ? "md:pe-[24rem]" : ""}`}>
-          <PromptInput
-            value={input}
-            onChange={setInput}
-            onSubmit={handleSubmit}
-            onAttach={handleAttach}
-            busy={busy}
-            attachmentsBusy={uploading}
-          />
-          <div className="mt-2 text-center text-[11px] text-muted-foreground/70">
-            {lang === "ar"
-              ? "اضغط Enter للإرسال أو استخدم زر المشبك لرفع الملفات."
-              : "Press Enter to send, or use the paperclip to upload files."}
+          <div
+            className={`mt-3 border-t border-border/40 bg-background/70 backdrop-blur md:sticky md:bottom-0 md:z-20 md:mt-4 ${
+              panelOpen ? "md:pe-[24rem]" : ""
+            }`}
+            style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
+          >
+            <div className="px-1 py-3 md:py-4">
+              <PromptInput
+                value={input}
+                onChange={setInput}
+                onSubmit={handleSubmit}
+                onAttach={handleAttach}
+                busy={busy}
+                attachmentsBusy={uploading}
+              />
+              <div className="mt-2 text-center text-[11px] text-muted-foreground/70">
+                {lang === "ar"
+                  ? "اضغط Enter للإرسال أو استخدم زر المشبك لرفع الملفات."
+                  : "Press Enter to send, or use the paperclip to upload files."}
+              </div>
+            </div>
           </div>
         </div>
       </div>

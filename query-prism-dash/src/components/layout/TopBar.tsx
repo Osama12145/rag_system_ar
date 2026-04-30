@@ -2,7 +2,7 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import { Languages, Menu, Search } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 
-import { listDocuments, listSessions, type DocumentRecord, type Session } from "@/lib/api";
+import { useDocumentsQuery, useSessionsQuery, type DocumentRecord, type Session } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { AppSidebarContent } from "./AppSidebar";
@@ -21,6 +21,8 @@ export function TopBar() {
   const [results, setResults] = useState<SearchResults>({ docs: [], sessions: [] });
   const [searching, setSearching] = useState(false);
   const [focused, setFocused] = useState(false);
+  const { data: documentsData } = useDocumentsQuery();
+  const { data: sessionsData } = useSessionsQuery();
 
   useEffect(() => {
     const params = new URLSearchParams(location.search);
@@ -35,9 +37,10 @@ export function TopBar() {
       return;
     }
 
-    const timer = window.setTimeout(async () => {
+    const timer = window.setTimeout(() => {
       setSearching(true);
-      const [{ docs }, { sessions }] = await Promise.all([listDocuments(), listSessions()]);
+      const docs = documentsData?.docs ?? [];
+      const sessions = sessionsData?.sessions ?? [];
       setResults({
         docs: docs.filter((doc) => doc.name.toLowerCase().includes(value)).slice(0, 5),
         sessions: sessions
@@ -51,7 +54,7 @@ export function TopBar() {
     }, 220);
 
     return () => window.clearTimeout(timer);
-  }, [query]);
+  }, [documentsData?.docs, query, sessionsData?.sessions]);
 
   const hasResults = results.docs.length > 0 || results.sessions.length > 0;
   const showResults = focused && query.trim().length >= 2;

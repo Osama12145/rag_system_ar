@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { LogIn, ShieldCheck, UserCircle2 } from "lucide-react";
 
@@ -6,11 +6,11 @@ import { AppShell } from "@/components/layout/AppShell";
 import {
   continueAsGuest,
   getCurrentIdentity,
-  listDocuments,
-  listSessions,
   listStoredIdentities,
   switchIdentity,
   upsertLocalIdentity,
+  useDocumentsQuery,
+  useSessionsQuery,
   type StoredIdentity,
 } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
@@ -26,25 +26,31 @@ const Profile = () => {
   const [email, setEmail] = useState("");
   const [activeIdentity, setActiveIdentity] = useState<StoredIdentity>(() => getCurrentIdentity());
   const [identities, setIdentities] = useState<StoredIdentity[]>(() => listStoredIdentities());
-  const [stats, setStats] = useState<Stats>({ docs: 0, sessions: 0 });
-  const [loadingStats, setLoadingStats] = useState(true);
+  const { data: docsData, isLoading: loadingDocs } = useDocumentsQuery();
+  const { data: sessionsData, isLoading: loadingSessions } = useSessionsQuery();
+
+  const stats: Stats = {
+    docs: docsData?.docs.length ?? 0,
+    sessions: sessionsData?.sessions.length ?? 0,
+  };
+  const loadingStats = loadingDocs || loadingSessions;
 
   const copy = useMemo(
     () => ({
       title: lang === "ar" ? "الملف الشخصي والإعدادات" : "Profile & Settings",
       subtitle:
         lang === "ar"
-          ? "تقدر تستخدم النظام كضيف، أو تحفظ ملفًا شخصيًا محليًا وتبدّل له وقت ما تريد."
+          ? "تقدر تستخدم النظام كضيف، أو تحفظ ملفاً شخصياً محلياً وتبدّل له وقت ما تريد."
           : "You can keep using the app as a guest, or save an optional local profile and switch back to it anytime.",
       guestTitle: lang === "ar" ? "وضع الضيف" : "Guest Mode",
       guestDesc:
         lang === "ar"
-          ? "الدخول غير إلزامي. استخدامك كضيف يبقى معزولًا داخل هذا المتصفح."
+          ? "الدخول غير إلزامي. استخدامك كضيف يبقى معزولاً داخل هذا المتصفح."
           : "Login is optional. Guest usage stays isolated inside this browser.",
       loginTitle: lang === "ar" ? "تسجيل دخول اختياري" : "Optional Sign In",
       loginDesc:
         lang === "ar"
-          ? "اكتب الاسم والبريد لحفظ ملف محلي على هذا الجهاز. إذا كان البريد موجودًا، سيتم فتح نفس الملف."
+          ? "اكتب الاسم والبريد لحفظ ملف محلي على هذا الجهاز. إذا كان البريد موجوداً، سيتم فتح نفس الملف."
           : "Enter your name and email to save a local profile on this device. If the email already exists, it reopens that profile.",
       name: lang === "ar" ? "الاسم" : "Name",
       email: lang === "ar" ? "البريد الإلكتروني" : "Email",
@@ -63,25 +69,6 @@ const Profile = () => {
     }),
     [lang],
   );
-
-  useEffect(() => {
-    let cancelled = false;
-    setLoadingStats(true);
-    Promise.all([listDocuments(), listSessions()]).then(([docsResult, sessionsResult]) => {
-      if (cancelled) {
-        return;
-      }
-      setStats({
-        docs: docsResult.docs.length,
-        sessions: sessionsResult.sessions.length,
-      });
-      setLoadingStats(false);
-    });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [activeIdentity.id]);
 
   const refreshIdentities = () => {
     setActiveIdentity(getCurrentIdentity());
@@ -147,15 +134,11 @@ const Profile = () => {
               <div className="grid gap-3 sm:grid-cols-2">
                 <div className="rounded-2xl border border-border/60 bg-background/40 p-4">
                   <div className="text-xs uppercase tracking-[0.16em] text-muted-foreground">{copy.documents}</div>
-                  <div className="mt-2 text-2xl font-semibold text-foreground">
-                    {loadingStats ? "..." : stats.docs}
-                  </div>
+                  <div className="mt-2 text-2xl font-semibold text-foreground">{loadingStats ? "..." : stats.docs}</div>
                 </div>
                 <div className="rounded-2xl border border-border/60 bg-background/40 p-4">
                   <div className="text-xs uppercase tracking-[0.16em] text-muted-foreground">{copy.sessions}</div>
-                  <div className="mt-2 text-2xl font-semibold text-foreground">
-                    {loadingStats ? "..." : stats.sessions}
-                  </div>
+                  <div className="mt-2 text-2xl font-semibold text-foreground">{loadingStats ? "..." : stats.sessions}</div>
                 </div>
               </div>
 
@@ -234,18 +217,12 @@ const Profile = () => {
                 return (
                   <div
                     key={identity.id}
-                    className={`rounded-2xl border p-4 transition-colors ${
-                      active
-                        ? "border-primary/50 bg-primary/10"
-                        : "border-border/60 bg-card/40"
-                    }`}
+                    className={`rounded-2xl border p-4 transition-colors ${active ? "border-primary/50 bg-primary/10" : "border-border/60 bg-card/40"}`}
                   >
                     <div className="flex items-center justify-between gap-3">
                       <div className="min-w-0">
                         <div className="truncate font-medium text-foreground">{identity.name}</div>
-                        {identity.email && (
-                          <div className="truncate text-sm text-muted-foreground">{identity.email}</div>
-                        )}
+                        {identity.email && <div className="truncate text-sm text-muted-foreground">{identity.email}</div>}
                       </div>
                       <span className="rounded-full bg-background/70 px-2.5 py-1 text-[11px] text-muted-foreground">
                         {identity.type === "guest" ? copy.guestBadge : copy.localBadge}

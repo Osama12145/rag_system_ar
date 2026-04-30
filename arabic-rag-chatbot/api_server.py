@@ -3,9 +3,9 @@ api_server.py - FastAPI backend for the Arabic RAG system.
 Run with: uvicorn api_server:app --reload
 """
 
-from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 import asyncio
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from email.header import decode_header
 import logging
 import os
@@ -16,7 +16,7 @@ import unicodedata
 from urllib.parse import unquote
 import uuid
 
-from fastapi import FastAPI, File, Header, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -31,9 +31,38 @@ from vector_store import VectorStoreManager
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+moderation_logger = logging.getLogger("moderation")
+if not moderation_logger.handlers:
+    moderation_handler = logging.StreamHandler()
+    moderation_handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
+    moderation_logger.addHandler(moderation_handler)
+moderation_logger.setLevel(logging.INFO)
+moderation_logger.propagate = False
+
 vs_manager: Optional[VectorStoreManager] = None
 chatbot: Optional[RAGChatbot] = None
 DEFAULT_USER_ID = "anonymous"
+UPLOAD_JOBS: Dict[str, Dict[str, Any]] = {}
+
+PROMPT_INJECTION_PATTERNS = [
+    "ignore previous",
+    "start your response with",
+    "you are now",
+    "pretend you are",
+    "act as",
+    "dan",
+]
+ARABIC_SLUR_BLOCKLIST = [
+    "يا زنجي",
+    "زنجي",
+    "عبد",
+    "متخلف",
+    "كلب",
+    "حمار",
+    "قذر",
+    "وسخ",
+]
+
 DOCUMENT_INVENTORY_PATTERNS = [
     "what files do you have",
     "what documents do you have",
@@ -90,11 +119,29 @@ FILE_CONTENT_QUERY_PATTERNS = [
 ]
 
 
+async def cleanup_old_jobs() -> None:
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=2)
+    to_delete = [
+        job_id
+        for job_id, job in UPLOAD_JOBS.items()
+        if datetime.fromisoformat(job["updated_at"]) < cutoff and job["status"] in {"completed", "error"}
+    ]
+    for job_id in to_delete:
+        UPLOAD_JOBS.pop(job_id, None)
+
+
+async def _run_periodic(fn, interval_seconds: int) -> None:
+    while True:
+        await asyncio.sleep(interval_seconds)
+        await fn()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize and clean up application resources."""
     global vs_manager, chatbot
     logger.info("Starting application...")
+    cleanup_task: Optional[asyncio.Task] = None
 
     try:
         await init_db()
@@ -105,6 +152,7 @@ async def lifespan(app: FastAPI):
     try:
         vs_manager = VectorStoreManager()
         chatbot = RAGChatbot(vs_manager)
+        cleanup_task = asyncio.create_task(_run_periodic(cleanup_old_jobs, interval_seconds=3600))
         if settings.RESTORE_CHAT_HISTORY_ON_STARTUP:
             logger.info("Chat history restore is enabled, but history is client-managed per session.")
         logger.info("Application initialized successfully")
@@ -114,6 +162,12 @@ async def lifespan(app: FastAPI):
     yield
 
     logger.info("Shutting down application...")
+    if cleanup_task:
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except asyncio.CancelledError:
+            pass
     await close_db()
     logger.info("Application shutdown complete")
 
@@ -136,8 +190,6 @@ app.add_middleware(
 
 
 class ChatRequest(BaseModel):
-    """Chat request payload."""
-
     message: str = Field(default="", max_length=4000)
     query: Optional[str] = None
     sourceCheck: bool = True
@@ -160,8 +212,6 @@ class ChatRequest(BaseModel):
 
 
 class DocumentRecord(BaseModel):
-    """Single document metadata record returned to the frontend."""
-
     id: str
     name: str
     size: int
@@ -172,17 +222,15 @@ class DocumentRecord(BaseModel):
 
 
 class DocumentUploadResponse(BaseModel):
-    """Document upload response."""
-
     message: str
     file_id: str
     success: bool
     document: Optional[DocumentRecord] = None
+    job_id: Optional[str] = None
+    status: Optional[str] = None
 
 
 class HealthResponse(BaseModel):
-    """Health check response."""
-
     status: str
     initialized: bool
     total_vectors: Optional[int] = None
@@ -190,13 +238,11 @@ class HealthResponse(BaseModel):
 
 
 def normalize_user_id(user_id: Optional[str]) -> str:
-    """Normalize user identity values coming from the frontend."""
     value = (user_id or "").strip()
     return value[:128] if value else DEFAULT_USER_ID
 
 
 def normalize_upload_filename(filename: Optional[str]) -> str:
-    """Decode common encoded filename formats and keep only a safe basename."""
     raw_name = (filename or "").strip()
     if not raw_name:
         return ""
@@ -219,7 +265,6 @@ def normalize_upload_filename(filename: Optional[str]) -> str:
 
 
 def normalize_search_text(value: str) -> str:
-    """Normalize user queries and filenames for loose matching."""
     lowered = unicodedata.normalize("NFC", (value or "").strip().lower())
     translation_table = str.maketrans(
         {
@@ -236,6 +281,45 @@ def normalize_search_text(value: str) -> str:
     lowered = lowered.translate(translation_table)
     lowered = re.sub(r"[^\w\u0600-\u06FF.\- ]+", " ", lowered, flags=re.UNICODE)
     return " ".join(lowered.split())
+
+
+def detect_query_language(query_text: str, ui_language: str = "en") -> str:
+    text_value = (query_text or "").strip()
+    if not text_value:
+        return ui_language
+
+    meaningful_chars = [char for char in text_value if not char.isspace()]
+    if not meaningful_chars:
+        return ui_language
+
+    arabic_chars = [char for char in meaningful_chars if "\u0600" <= char <= "\u06FF"]
+    arabic_ratio = len(arabic_chars) / len(meaningful_chars)
+
+    if arabic_ratio > 0.60:
+        return "ar"
+    if arabic_ratio < 0.20:
+        return "en"
+    return ui_language
+
+
+def validate_input(query_text: str, session_id: str) -> None:
+    text_value = (query_text or "").strip()
+    normalized = text_value.lower()
+
+    if len(text_value) < 2:
+        moderation_logger.warning("blocked: short_query from %s", session_id)
+        raise HTTPException(status_code=400, detail="هذا الطلب لا يمكن معالجته")
+
+    for pattern in PROMPT_INJECTION_PATTERNS:
+        if pattern in normalized:
+            moderation_logger.warning("blocked: prompt_injection from %s", session_id)
+            raise HTTPException(status_code=400, detail="هذا الطلب لا يمكن معالجته")
+
+    normalized_arabic = normalize_search_text(text_value)
+    for term in ARABIC_SLUR_BLOCKLIST:
+        if normalize_search_text(term) in normalized_arabic:
+            moderation_logger.warning("blocked: abusive_language from %s", session_id)
+            raise HTTPException(status_code=400, detail="هذا الطلب لا يمكن معالجته")
 
 
 def is_document_inventory_query(query: str) -> bool:
@@ -316,18 +400,15 @@ async def build_specific_file_response(user_id: str, user_query: str, language: 
 async def build_document_inventory_response(user_id: str, language: str) -> str:
     rows = await get_user_documents_for_collection(user_id)
     if not rows:
-        return (
-            "لا توجد ملفات مرفوعة حاليًا."
-            if language == "ar"
-            else "There are no uploaded documents right now."
-        )
+        return "لا توجد ملفات مرفوعة حالياً." if language == "ar" else "There are no uploaded documents right now."
 
-    document_lines = []
-    for _file_id, filename, pages, chunks, status in rows:
-        document_lines.append(f"- {filename} ({pages or 0} pages, {chunks or 0} chunks, {status or 'ready'})")
+    document_lines = [
+        f"- {filename} ({pages or 0} pages, {chunks or 0} chunks, {status or 'ready'})"
+        for _file_id, filename, pages, chunks, status in rows
+    ]
 
     if language == "ar":
-        return "الملفات المتوفرة حاليًا هي:\n" + "\n".join(document_lines)
+        return "الملفات المتوفرة حالياً هي:\n" + "\n".join(document_lines)
     return "The currently available documents are:\n" + "\n".join(document_lines)
 
 
@@ -339,11 +420,12 @@ async def save_chat_message_for_user(
     session_id: str,
     user_id: str,
     user_message: str,
-    ai_response: str,
-):
-    """Persist a chat exchange for the current user."""
-    if not user_message and not ai_response:
+    response_holder: Dict[str, str],
+) -> None:
+    ai_response = (response_holder.get("ai_response") or "").strip()
+    if not user_message.strip() and not ai_response:
         return
+
     try:
         async with get_async_session() as session:
             session.add(
@@ -355,19 +437,24 @@ async def save_chat_message_for_user(
                     timestamp=datetime.now(timezone.utc),
                 )
             )
-            await session.commit()
     except Exception as e:
         logger.error("Failed to save chat history: %s", e)
 
 
-def persist_chat_message(session_id: str, user_id: str, user_message: str, ai_response: str) -> None:
-    """Persist chat history whether or not the current thread has a running event loop."""
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        asyncio.run(save_chat_message_for_user(session_id, user_id, user_message, ai_response))
-    else:
-        loop.create_task(save_chat_message_for_user(session_id, user_id, user_message, ai_response))
+def queue_chat_persistence(
+    background_tasks: BackgroundTasks,
+    session_id: str,
+    user_id: str,
+    user_message: str,
+    response_holder: Dict[str, str],
+) -> None:
+    background_tasks.add_task(
+        save_chat_message_for_user,
+        session_id,
+        user_id,
+        user_message,
+        response_holder,
+    )
 
 
 def build_document_record(
@@ -399,9 +486,146 @@ def build_document_record(
     )
 
 
+async def process_upload_job(
+    job_id: str,
+    user_id: str,
+    temp_dir: Path,
+    saved_files: List[Path],
+    file_ids: List[str],
+    file_sizes: Dict[str, int],
+    file_ids_by_name: Dict[str, str],
+    upload_date: datetime,
+) -> None:
+    try:
+        UPLOAD_JOBS[job_id].update(
+            {
+                "status": "processing",
+                "progress": 15,
+                "message": "Extracting document text",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+        processor = DocumentProcessor()
+        documents = await processor.process_documents_async(
+            str(temp_dir),
+            upload_timestamp=upload_date.isoformat(),
+        )
+
+        UPLOAD_JOBS[job_id].update(
+            {
+                "status": "indexing",
+                "progress": 55,
+                "message": "Indexing document chunks",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+        for doc in documents:
+            source_name = doc.metadata.get("source", "")
+            doc.metadata["user_id"] = user_id
+            doc.metadata["upload_timestamp"] = upload_date.isoformat()
+            if source_name in file_ids_by_name:
+                doc.metadata["file_id"] = file_ids_by_name[source_name]
+
+        if documents:
+            indexed_ok = await vs_manager.add_documents_to_vectorstore_async(documents)
+            if not indexed_ok:
+                raise RuntimeError("Failed to index uploaded documents into Qdrant.")
+
+        chunks_per_file: Dict[str, int] = {}
+        pages_per_file: Dict[str, int] = {}
+        for doc in documents:
+            src = doc.metadata.get("source", "")
+            chunks_per_file[src] = chunks_per_file.get(src, 0) + 1
+            page_number = doc.metadata.get("page_number") or doc.metadata.get("page")
+            if isinstance(page_number, int):
+                pages_per_file[src] = max(pages_per_file.get(src, 0), page_number)
+
+        first_document: Optional[DocumentRecord] = None
+        for file_id, file_path in zip(file_ids, saved_files):
+            filename = file_path.name
+            pages = pages_per_file.get(filename, 0)
+            chunks = chunks_per_file.get(filename, 0)
+
+            async with get_async_session() as db:
+                await db.execute(
+                    text(
+                        """
+                        UPDATE file_metadata
+                        SET status = 'ready',
+                            chunks = :chunks,
+                            pages = :pages,
+                            error_message = NULL
+                        WHERE file_id = :fid
+                        """
+                    ),
+                    {"chunks": chunks, "pages": pages, "fid": file_id},
+                )
+
+            if first_document is None:
+                first_document = build_document_record(
+                    file_id=file_id,
+                    filename=filename,
+                    file_size=file_sizes[file_id],
+                    pages=pages,
+                    chunks=chunks,
+                    upload_date=upload_date,
+                    status="ready",
+                )
+
+        UPLOAD_JOBS[job_id].update(
+            {
+                "status": "completed",
+                "progress": 100,
+                "message": f"Successfully indexed {len(documents)} chunks from {len(saved_files)} file(s)",
+                "document": first_document.model_dump() if first_document else None,
+                "file_ids": file_ids,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+    except Exception as e:
+        logger.error("Upload job %s failed: %s", job_id, e)
+        for file_id in file_ids:
+            try:
+                async with get_async_session() as db:
+                    await db.execute(
+                        text(
+                            """
+                            UPDATE file_metadata
+                            SET status = 'error',
+                                error_message = :error_message
+                            WHERE file_id = :fid
+                            """
+                        ),
+                        {"fid": file_id, "error_message": str(e)},
+                    )
+            except Exception as mark_err:
+                logger.error("Failed to mark upload %s as error: %s", file_id, mark_err)
+
+        UPLOAD_JOBS[job_id].update(
+            {
+                "status": "error",
+                "progress": 100,
+                "message": str(e),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+    finally:
+        for file_path in saved_files:
+            try:
+                if file_path.exists():
+                    file_path.unlink()
+            except Exception as cleanup_err:
+                logger.warning("Failed to remove temp file %s: %s", file_path, cleanup_err)
+        try:
+            temp_dir.rmdir()
+        except Exception:
+            pass
+
+
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
-    """Check system health status."""
     qdrant_ok = chatbot is not None
     db_ok = False
 
@@ -422,8 +646,11 @@ async def health_check():
 
 
 @app.post("/api/chat")
-async def chat(request: ChatRequest, x_user_id: Optional[str] = Header(default=None, alias="X-User-Id")):
-    """Stream a response from the chatbot."""
+async def chat(
+    request: ChatRequest,
+    background_tasks: BackgroundTasks,
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+):
     if not chatbot:
         raise HTTPException(status_code=503, detail="Chatbot not initialized. Check API keys and vector store config.")
 
@@ -431,35 +658,72 @@ async def chat(request: ChatRequest, x_user_id: Optional[str] = Header(default=N
         user_message = request.message or (request.query or "").strip()
         user_id = normalize_user_id(x_user_id)
         session_id = request.sessionId or str(uuid.uuid4())
-        logger.info("New query [%s]: %s", request.language, user_message[:80])
+
+        validate_input(user_message, session_id)
+
+        detected_language = detect_query_language(
+            user_message,
+            ui_language=request.language or "en",
+        )
+        logger.info("New query [%s]: %s", detected_language, user_message[:80])
 
         if is_document_inventory_query(user_message):
-            inventory_response = await build_document_inventory_response(user_id, request.language)
-            persist_chat_message(session_id, user_id, user_message, inventory_response)
-            return StreamingResponse(stream_plain_text_response(inventory_response), media_type="text/plain")
+            inventory_response = await build_document_inventory_response(user_id, detected_language)
+            response_holder = {"ai_response": inventory_response}
+            queue_chat_persistence(background_tasks, session_id, user_id, user_message, response_holder)
+            return StreamingResponse(
+                stream_plain_text_response(inventory_response),
+                media_type="text/plain",
+                background=background_tasks,
+            )
 
         if is_specific_file_query(user_message):
-            specific_file_response = await build_specific_file_response(user_id, user_message, request.language)
+            specific_file_response = await build_specific_file_response(user_id, user_message, detected_language)
             if specific_file_response:
-                persist_chat_message(session_id, user_id, user_message, specific_file_response)
+                response_holder = {"ai_response": specific_file_response}
+                queue_chat_persistence(background_tasks, session_id, user_id, user_message, response_holder)
                 return StreamingResponse(
                     stream_plain_text_response(specific_file_response),
                     media_type="text/plain",
+                    background=background_tasks,
                 )
 
         matched_file_ids = await find_matching_file_ids(user_id, user_message)
         prefer_full_file_context = bool(matched_file_ids and is_file_content_query(user_message))
-        generator = chatbot.stream_chat(
-            user_query=user_message,
-            include_sources=request.sourceCheck,
-            language=request.language,
-            history=request.history,
-            user_id=user_id,
-            file_ids=matched_file_ids or None,
-            prefer_full_file_context=prefer_full_file_context,
-            on_response_complete=lambda response: persist_chat_message(session_id, user_id, user_message, response),
+        response_holder: Dict[str, str] = {"ai_response": ""}
+
+        def handle_response_complete(response_text: str) -> None:
+            response_holder["ai_response"] = response_text
+
+        async def stream_response():
+            try:
+                for chunk in chatbot.stream_chat(
+                    user_query=user_message,
+                    include_sources=request.sourceCheck,
+                    language=detected_language,
+                    history=request.history,
+                    user_id=user_id,
+                    file_ids=matched_file_ids or None,
+                    prefer_full_file_context=prefer_full_file_context,
+                    on_response_complete=handle_response_complete,
+                ):
+                    yield chunk
+            finally:
+                queue_chat_persistence(
+                    background_tasks,
+                    session_id,
+                    user_id,
+                    user_message,
+                    response_holder,
+                )
+
+        return StreamingResponse(
+            stream_response(),
+            media_type="text/plain",
+            background=background_tasks,
         )
-        return StreamingResponse(generator, media_type="text/plain")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Chat error: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
@@ -470,7 +734,6 @@ async def get_chat_history(
     session_id: Optional[str] = None,
     x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
 ):
-    """Return persisted conversation history."""
     try:
         user_id = normalize_user_id(x_user_id)
         async with get_async_session() as db:
@@ -512,11 +775,7 @@ async def get_chat_history(
             history.append({"role": "user", "content": user_message, "timestamp": iso_timestamp})
             history.append({"role": "assistant", "content": ai_response, "timestamp": iso_timestamp})
 
-        return {
-            "history": history,
-            "message_count": len(rows),
-            "session_id": selected_session_id,
-        }
+        return {"history": history, "message_count": len(rows), "session_id": selected_session_id}
     except Exception as e:
         logger.error("Chat history error: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
@@ -527,7 +786,6 @@ async def clear_history(
     session_id: Optional[str] = None,
     x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
 ):
-    """Clear conversation history."""
     try:
         user_id = normalize_user_id(x_user_id)
         async with get_async_session() as db:
@@ -552,7 +810,6 @@ async def clear_history(
                     text("DELETE FROM chat_history WHERE session_id = :sid AND user_id = :uid"),
                     {"sid": selected_session_id, "uid": user_id},
                 )
-                await db.commit()
 
             if chatbot:
                 chatbot.clear_history()
@@ -565,7 +822,6 @@ async def clear_history(
 
 @app.get("/api/sessions")
 async def list_sessions(x_user_id: Optional[str] = Header(default=None, alias="X-User-Id")):
-    """Return distinct conversation sessions."""
     try:
         user_id = normalize_user_id(x_user_id)
         async with get_async_session() as db:
@@ -606,7 +862,6 @@ async def list_sessions(x_user_id: Optional[str] = Header(default=None, alias="X
 
 @app.get("/api/documents", response_model=List[DocumentRecord])
 async def list_documents(x_user_id: Optional[str] = Header(default=None, alias="X-User-Id")):
-    """Return indexed documents from the metadata store."""
     try:
         user_id = normalize_user_id(x_user_id)
         async with get_async_session() as db:
@@ -642,10 +897,10 @@ async def list_documents(x_user_id: Optional[str] = Header(default=None, alias="
 
 @app.post("/api/documents/upload", response_model=DocumentUploadResponse)
 async def upload_documents(
+    background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...),
     x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
 ):
-    """Upload and index new documents."""
     if not vs_manager:
         raise HTTPException(status_code=503, detail="Vector Store not initialized")
 
@@ -660,6 +915,7 @@ async def upload_documents(
     file_sizes: Dict[str, int] = {}
     file_ids_by_name: Dict[str, str] = {}
     upload_date = datetime.now(timezone.utc)
+    job_id = str(uuid.uuid4())
 
     try:
         for file in files:
@@ -676,109 +932,83 @@ async def upload_documents(
             file_path = temp_dir / normalized_filename
             file_ids.append(file_id)
 
-            # Stream uploads to disk so large files never sit fully in RAM.
             file_size = 0
             with open(file_path, "wb") as f:
                 while chunk := await file.read(1024 * 1024):
                     file_size += len(chunk)
                     if file_size > max_size_bytes:
-                            file_path.unlink(missing_ok=True)
-                            raise HTTPException(
-                                status_code=413,
-                                detail=f"File too large (max 50 MB): {normalized_filename}",
-                            )
+                        file_path.unlink(missing_ok=True)
+                        raise HTTPException(
+                            status_code=413,
+                            detail=f"File too large (max 50 MB): {normalized_filename}",
+                        )
                     f.write(chunk)
 
             file_sizes[file_id] = file_size
             saved_files.append(file_path)
-
-            try:
-                async with get_async_session() as session:
-                    session.add(
-                        FileMetadata(
-                            file_id=file_id,
-                            user_id=user_id,
-                            filename=normalized_filename,
-                            file_size=file_sizes[file_id],
-                            upload_date=upload_date,
-                            collection_name=settings.QDRANT_COLLECTION_NAME,
-                            status="indexing",
-                            pages=0,
-                            chunks=0,
-                        )
-                    )
-                    await session.commit()
-            except Exception as db_err:
-                logger.error("DB insert failed for %s: %s", normalized_filename, db_err)
             file_ids_by_name[normalized_filename] = file_id
 
-        processor = DocumentProcessor()
-        documents = processor.process_documents(str(temp_dir))
-        total_chunks = len(documents)
-
-        for doc in documents:
-            source_name = doc.metadata.get("source", "")
-            doc.metadata["user_id"] = user_id
-            if source_name in file_ids_by_name:
-                doc.metadata["file_id"] = file_ids_by_name[source_name]
-
-        if documents and not vs_manager.add_documents_to_vectorstore(documents):
-            raise RuntimeError("Failed to index uploaded documents into Qdrant.")
-
-        chunks_per_file: Dict[str, int] = {}
-        pages_per_file: Dict[str, int] = {}
-        for doc in documents:
-            src = doc.metadata.get("source", "")
-            chunks_per_file[src] = chunks_per_file.get(src, 0) + 1
-            page_num = doc.metadata.get("page")
-            if isinstance(page_num, int):
-                pages_per_file[src] = max(pages_per_file.get(src, 0), page_num + 1)
-
-        first_document: Optional[DocumentRecord] = None
-        for file_id, file_path in zip(file_ids, saved_files):
-            filename = file_path.name
-            pages = pages_per_file.get(filename, 0)
-            chunks = chunks_per_file.get(filename, 0)
-            try:
-                async with get_async_session() as db:
-                    await db.execute(
-                        text(
-                            """
-                            UPDATE file_metadata
-                            SET status = 'ready',
-                                chunks = :chunks,
-                                pages = :pages,
-                                error_message = NULL
-                            WHERE file_id = :fid
-                            """
-                        ),
-                        {"chunks": chunks, "pages": pages, "fid": file_id},
+            async with get_async_session() as session:
+                session.add(
+                    FileMetadata(
+                        file_id=file_id,
+                        user_id=user_id,
+                        filename=normalized_filename,
+                        file_size=file_sizes[file_id],
+                        upload_date=upload_date,
+                        collection_name=settings.QDRANT_COLLECTION_NAME,
+                        status="indexing",
+                        pages=0,
+                        chunks=0,
                     )
-                    await db.commit()
-            except Exception as upd_err:
-                logger.error("Failed to update metadata for %s (%s): %s", filename, file_id, upd_err)
-
-            if first_document is None:
-                first_document = build_document_record(
-                    file_id=file_id,
-                    filename=filename,
-                    file_size=file_sizes[file_id],
-                    pages=pages,
-                    chunks=chunks,
-                    upload_date=upload_date,
-                    status="ready",
                 )
 
+        UPLOAD_JOBS[job_id] = {
+            "job_id": job_id,
+            "status": "queued",
+            "progress": 0,
+            "message": "Upload accepted",
+            "user_id": user_id,
+            "file_ids": file_ids,
+            "document": None,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        background_tasks.add_task(
+            process_upload_job,
+            job_id,
+            user_id,
+            temp_dir,
+            saved_files,
+            file_ids,
+            file_sizes,
+            file_ids_by_name,
+            upload_date,
+        )
+
         return DocumentUploadResponse(
-            message=f"Successfully indexed {total_chunks} chunks from {len(saved_files)} file(s)",
+            message="Upload accepted and processing started",
             file_id=file_ids[0] if file_ids else "",
             success=True,
-            document=first_document,
+            job_id=job_id,
+            status="queued",
+            document=build_document_record(
+                file_id=file_ids[0],
+                filename=saved_files[0].name,
+                file_size=file_sizes[file_ids[0]],
+                pages=0,
+                chunks=0,
+                upload_date=upload_date,
+                status="indexing",
+            )
+            if file_ids and saved_files
+            else None,
         )
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("Upload error: %s", e)
+        logger.error("Upload enqueue error: %s", e)
         for file_id in file_ids:
             try:
                 async with get_async_session() as db:
@@ -793,26 +1023,49 @@ async def upload_documents(
                         ),
                         {"fid": file_id, "error_message": str(e)},
                     )
-                    await db.commit()
             except Exception as mark_err:
                 logger.error("Failed to mark upload %s as error: %s", file_id, mark_err)
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
+
         for file_path in saved_files:
             try:
                 if file_path.exists():
                     file_path.unlink()
-            except Exception as cleanup_err:
-                logger.warning("Failed to remove temp file %s: %s", file_path, cleanup_err)
+            except Exception:
+                pass
         try:
             temp_dir.rmdir()
         except Exception:
             pass
 
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/upload/status/{job_id}")
+async def get_upload_status(
+    job_id: str,
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+):
+    user_id = normalize_user_id(x_user_id)
+    job = UPLOAD_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Upload job not found")
+    if job.get("user_id") != user_id:
+        raise HTTPException(status_code=403, detail="Not allowed to access this upload job")
+
+    return {
+        "job_id": job["job_id"],
+        "status": job["status"],
+        "progress": job["progress"],
+        "message": job["message"],
+        "file_ids": job.get("file_ids", []),
+        "document": job.get("document"),
+        "created_at": job.get("created_at"),
+        "updated_at": job.get("updated_at"),
+    }
+
 
 @app.get("/api/documents/stats")
 async def get_document_stats(x_user_id: Optional[str] = Header(default=None, alias="X-User-Id")):
-    """Get vector index and file statistics."""
     file_count = 0
     total_chunks = 0
     try:
@@ -838,7 +1091,6 @@ async def get_document_stats(x_user_id: Optional[str] = Header(default=None, ali
 
 @app.delete("/api/documents")
 async def clear_all_documents(x_user_id: Optional[str] = Header(default=None, alias="X-User-Id")):
-    """Delete all documents from Qdrant and file metadata."""
     success_qdrant = False
     success_db = False
     user_id = normalize_user_id(x_user_id)
@@ -852,7 +1104,6 @@ async def clear_all_documents(x_user_id: Optional[str] = Header(default=None, al
     try:
         async with get_async_session() as db:
             await db.execute(text("DELETE FROM file_metadata WHERE user_id = :uid"), {"uid": user_id})
-            await db.commit()
         success_db = True
     except Exception as e:
         logger.error("Database clear error: %s", e)
@@ -870,7 +1121,6 @@ async def search(
     top_k: int = 5,
     x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
 ):
-    """Search indexed documents directly via Qdrant."""
     if not vs_manager:
         raise HTTPException(status_code=503, detail="Vector Store not initialized")
 
@@ -895,7 +1145,6 @@ async def search(
 
 @app.get("/api/usage")
 async def get_usage(x_user_id: Optional[str] = Header(default=None, alias="X-User-Id")):
-    """Return a rough usage estimate."""
     db_files = 0
     qdrant_chunks = 0
     try:
@@ -923,7 +1172,6 @@ async def get_usage(x_user_id: Optional[str] = Header(default=None, alias="X-Use
 
 @app.get("/")
 async def root():
-    """Root endpoint with API info."""
     return {
         "name": "Company Intelligence RAG API",
         "version": "1.2.0",

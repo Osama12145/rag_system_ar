@@ -1,3 +1,5 @@
+import { useQuery } from "@tanstack/react-query";
+
 declare global {
   interface Window {
     __APP_CONFIG__?: {
@@ -64,7 +66,23 @@ export type StoredIdentity = {
 export type TokenUsage = {
   used: number;
   total: number;
-  mocked: boolean;
+};
+
+export type HealthStatus = {
+  active: boolean;
+  degraded: boolean;
+  responseTimeMs: number;
+};
+
+export type UploadStatus = {
+  job_id: string;
+  status: "queued" | "processing" | "indexing" | "completed" | "error";
+  progress: number;
+  message: string;
+  file_ids: string[];
+  document?: DocumentRecord | null;
+  created_at?: string;
+  updated_at?: string;
 };
 
 type UploadResponse = {
@@ -72,6 +90,8 @@ type UploadResponse = {
   file_id: string;
   success: boolean;
   document?: DocumentRecord;
+  job_id?: string;
+  status?: string;
 };
 
 type ChatHistoryResponse = {
@@ -85,6 +105,8 @@ const IDENTITIES_STORAGE_KEY = "os-ai-identities";
 const CURRENT_IDENTITY_STORAGE_KEY = "os-ai-current-identity-id";
 const ACTIVE_SESSION_STORAGE_KEY = "os-ai-active-session-id";
 const DOCUMENT_UPLOAD_TIMEOUT_MS = 10 * 60 * 1000;
+const HEALTH_TIMEOUT_MS = 8_000;
+const DEGRADED_RESPONSE_THRESHOLD_MS = 5_000;
 
 function generateId(prefix: string) {
   if (typeof globalThis.crypto?.randomUUID === "function") {
@@ -97,9 +119,7 @@ function generateId(prefix: string) {
 function readStoredIdentities(): StoredIdentity[] {
   try {
     const raw = window.localStorage.getItem(IDENTITIES_STORAGE_KEY);
-    if (!raw) {
-      return [];
-    }
+    if (!raw) return [];
     const parsed = JSON.parse(raw) as StoredIdentity[];
     return Array.isArray(parsed) ? parsed : [];
   } catch {
@@ -224,11 +244,18 @@ async function fetchWithTimeout(
   input: RequestInfo | URL,
   init?: RequestInit,
   ms = 5000,
-): Promise<Response> {
+): Promise<{ response: Response; responseTimeMs: number }> {
   const controller = new AbortController();
+  const startedAt = performance.now();
   const timer = window.setTimeout(() => controller.abort(), ms);
   try {
-    return await fetch(input, { ...withUserHeaders(init), signal: controller.signal });
+    const response = await fetch(input, { ...withUserHeaders(init), signal: controller.signal });
+    return { response, responseTimeMs: Math.round(performance.now() - startedAt) };
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("Request timed out");
+    }
+    throw error;
   } finally {
     window.clearTimeout(timer);
   }
@@ -242,32 +269,25 @@ async function parseJsonOrThrow<T>(res: Response): Promise<T> {
   return (await res.json()) as T;
 }
 
-export async function listDocuments(): Promise<{
-  docs: DocumentRecord[];
-  mocked: boolean;
-}> {
-  try {
-    const res = await fetchWithTimeout(`${API_BASE}/api/documents`);
-    return { docs: await parseJsonOrThrow<DocumentRecord[]>(res), mocked: false };
-  } catch {
-    return { docs: [], mocked: true };
-  }
+export async function listDocuments(): Promise<{ docs: DocumentRecord[] }> {
+  const { response } = await fetchWithTimeout(`${API_BASE}/api/documents`);
+  return { docs: await parseJsonOrThrow<DocumentRecord[]>(response) };
 }
 
 export async function uploadDocument(
   file: File,
   onProgress?: (pct: number) => void,
-): Promise<{ doc: DocumentRecord; mocked: boolean }> {
+): Promise<{ doc: DocumentRecord; jobId?: string; status?: string }> {
   const formData = new FormData();
   formData.append("files", file);
   onProgress?.(10);
 
-  const res = await fetchWithTimeout(
+  const { response } = await fetchWithTimeout(
     `${API_BASE}/api/documents/upload`,
     { method: "POST", body: formData },
     DOCUMENT_UPLOAD_TIMEOUT_MS,
   );
-  const data = await parseJsonOrThrow<UploadResponse>(res);
+  const data = await parseJsonOrThrow<UploadResponse>(response);
   onProgress?.(100);
 
   return {
@@ -278,47 +298,34 @@ export async function uploadDocument(
       pages: 0,
       chunks: 0,
       uploadedAt: new Date().toISOString().slice(0, 10),
-      status: "ready",
+      status: "indexing",
     },
-    mocked: false,
+    jobId: data.job_id,
+    status: data.status,
   };
 }
 
-export async function listSessions(): Promise<{
-  sessions: Session[];
-  mocked: boolean;
-}> {
-  try {
-    const res = await fetchWithTimeout(`${API_BASE}/api/sessions`);
-    const data = await parseJsonOrThrow<{ sessions: Session[] }>(res);
-    return { sessions: data.sessions ?? [], mocked: false };
-  } catch {
-    return { sessions: [], mocked: true };
-  }
+export async function getUploadStatus(jobId: string): Promise<UploadStatus> {
+  const { response } = await fetchWithTimeout(`${API_BASE}/api/upload/status/${encodeURIComponent(jobId)}`);
+  return parseJsonOrThrow<UploadStatus>(response);
+}
+
+export async function listSessions(): Promise<{ sessions: Session[] }> {
+  const { response } = await fetchWithTimeout(`${API_BASE}/api/sessions`);
+  const data = await parseJsonOrThrow<{ sessions: Session[] }>(response);
+  return { sessions: data.sessions ?? [] };
 }
 
 export async function getChatHistory(
   sessionId?: string,
-): Promise<{
-  history: HistoryMessage[];
-  sessionId: string | null;
-  mocked: boolean;
-}> {
-  try {
-    const url = new URL(`${API_BASE}/api/chat/history`, window.location.origin);
-    if (sessionId) {
-      url.searchParams.set("session_id", sessionId);
-    }
-    const res = await fetchWithTimeout(url.toString());
-    const data = await parseJsonOrThrow<ChatHistoryResponse>(res);
-    return {
-      history: data.history ?? [],
-      sessionId: data.session_id,
-      mocked: false,
-    };
-  } catch {
-    return { history: [], sessionId: sessionId ?? null, mocked: true };
+): Promise<{ history: HistoryMessage[]; sessionId: string | null }> {
+  const url = new URL(`${API_BASE}/api/chat/history`, window.location.origin);
+  if (sessionId) {
+    url.searchParams.set("session_id", sessionId);
   }
+  const { response } = await fetchWithTimeout(url.toString());
+  const data = await parseJsonOrThrow<ChatHistoryResponse>(response);
+  return { history: data.history ?? [], sessionId: data.session_id };
 }
 
 export async function clearChatHistory(sessionId?: string): Promise<void> {
@@ -326,13 +333,11 @@ export async function clearChatHistory(sessionId?: string): Promise<void> {
   if (sessionId) {
     url.searchParams.set("session_id", sessionId);
   }
-  await fetchWithTimeout(
-    url.toString(),
-    {
-      method: "POST",
-    },
-    10_000,
-  );
+  const { response } = await fetchWithTimeout(url.toString(), { method: "POST" }, 10_000);
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: `HTTP ${response.status}` }));
+    throw new Error(error.detail || `HTTP ${response.status}`);
+  }
 }
 
 export async function* streamChat(
@@ -340,10 +345,9 @@ export async function* streamChat(
 ): AsyncGenerator<{
   delta?: string;
   citations?: Citation[];
-  mocked?: boolean;
   done?: boolean;
 }> {
-  const res = await fetchWithTimeout(
+  const { response } = await fetchWithTimeout(
     `${API_BASE}/api/chat`,
     {
       method: "POST",
@@ -353,12 +357,12 @@ export async function* streamChat(
     15_000,
   );
 
-  if (!res.ok || !res.body) {
-    const error = await res.json().catch(() => ({ detail: "Chat failed" }));
-    throw new Error(error.detail || `HTTP ${res.status}`);
+  if (!response.ok || !response.body) {
+    const error = await response.json().catch(() => ({ detail: "Chat failed" }));
+    throw new Error(error.detail || `HTTP ${response.status}`);
   }
 
-  const reader = res.body.getReader();
+  const reader = response.body.getReader();
   const decoder = new TextDecoder();
   const marker = "[CITATIONS]";
   let textBuffer = "";
@@ -410,28 +414,73 @@ export async function* streamChat(
       citations = [];
     }
   }
+
   yield { citations, done: true };
 }
 
 export async function getTokenUsage(): Promise<TokenUsage> {
-  try {
-    const res = await fetchWithTimeout(`${API_BASE}/api/usage`);
-    const data = await parseJsonOrThrow<{ used?: number; total?: number }>(res);
-    return { used: data.used ?? 0, total: data.total ?? 1_000_000, mocked: false };
-  } catch {
-    return { used: 0, total: 1_000_000, mocked: true };
-  }
+  const { response } = await fetchWithTimeout(`${API_BASE}/api/usage`);
+  const data = await parseJsonOrThrow<{ used?: number; total?: number }>(response);
+  return { used: data.used ?? 0, total: data.total ?? 1_000_000 };
 }
 
-export async function getQdrantStatus(): Promise<{
-  active: boolean;
-  mocked: boolean;
-}> {
-  try {
-    const res = await fetchWithTimeout(`${API_BASE}/health`, undefined, 3_000);
-    const data = await parseJsonOrThrow<{ status?: string }>(res);
-    return { active: data.status === "healthy" || data.status === "degraded", mocked: false };
-  } catch {
-    return { active: false, mocked: true };
-  }
+export async function getQdrantStatus(): Promise<HealthStatus> {
+  const { response, responseTimeMs } = await fetchWithTimeout(
+    `${API_BASE}/health`,
+    undefined,
+    HEALTH_TIMEOUT_MS,
+  );
+  const data = await parseJsonOrThrow<{ status?: string }>(response);
+  return {
+    active: data.status === "healthy" || data.status === "degraded",
+    degraded: responseTimeMs > DEGRADED_RESPONSE_THRESHOLD_MS,
+    responseTimeMs,
+  };
+}
+
+export function useDocumentsQuery() {
+  return useQuery({
+    queryKey: ["documents", getCurrentUserId()],
+    queryFn: listDocuments,
+    staleTime: 60_000,
+    retry: 1,
+  });
+}
+
+export function useSessionsQuery() {
+  return useQuery({
+    queryKey: ["sessions", getCurrentUserId()],
+    queryFn: listSessions,
+    staleTime: 30_000,
+    retry: 1,
+  });
+}
+
+export function useHistoryQuery(sessionId?: string) {
+  return useQuery({
+    queryKey: ["history", getCurrentUserId(), sessionId ?? null],
+    queryFn: () => getChatHistory(sessionId),
+    staleTime: 10_000,
+    retry: 1,
+  });
+}
+
+export function useUsageQuery() {
+  return useQuery({
+    queryKey: ["usage", getCurrentUserId()],
+    queryFn: getTokenUsage,
+    staleTime: 30_000,
+    retry: 1,
+    refetchInterval: 30_000,
+  });
+}
+
+export function useHealthQuery() {
+  return useQuery({
+    queryKey: ["health"],
+    queryFn: getQdrantStatus,
+    staleTime: 15_000,
+    retry: 1,
+    refetchInterval: 20_000,
+  });
 }

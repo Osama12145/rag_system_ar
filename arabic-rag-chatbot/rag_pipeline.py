@@ -4,8 +4,10 @@ Combines retrieval and generation for document-based Q&A.
 """
 
 from datetime import datetime
+from enum import Enum
 import json
 import logging
+import re
 from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -23,7 +25,7 @@ SYSTEM_PROMPTS = {
         "أجب على الأسئلة فقط بناءً على وثائق الشركة المقدمة. "
         "إذا لم تجد الإجابة في الوثائق، قل: "
         "'لم أجد معلومات حول هذا الموضوع في وثائق الشركة.' "
-        "لا تخترع معلومات أبدا. كن موجزا ومهنيا وأجب دائما باللغة العربية."
+        "لا تختلق معلومات أبداً. كن موجزاً ومهنياً وأجب دائماً باللغة العربية."
     ),
     "en": (
         "You are a helpful company assistant. "
@@ -46,6 +48,88 @@ Answer based strictly on the context above:""",
 )
 
 
+class RetrievalIntent(str, Enum):
+    SUMMARIZE_LATEST = "SUMMARIZE_LATEST"
+    SUMMARIZE_NAMED = "SUMMARIZE_NAMED"
+    COMPARE = "COMPARE"
+    GENERATE_QUESTIONS = "GENERATE_QUESTIONS"
+    SEMANTIC_QA = "SEMANTIC_QA"
+
+
+def detect_retrieval_intent(query: str, available_filenames: Optional[List[str]] = None) -> Dict[str, Any]:
+    normalized = (query or "").strip().lower()
+    filenames = available_filenames or []
+
+    summarize_keywords = ["summarize", "summarise", "summary", "ملخص", "لخص", "اختصر"]
+    latest_keywords = [
+        "latest",
+        "most recent",
+        "last uploaded",
+        "newest",
+        "uploaded file",
+        "آخر ملف",
+        "اخر ملف",
+        "أحدث ملف",
+        "احدث ملف",
+        "آخر وثيقة",
+        "اخر وثيقة",
+    ]
+    compare_keywords = ["compare", "comparison", "difference between", "قارن", "مقارنة", "فرق بين", "الفرق بين"]
+    question_gen_keywords = [
+        "generate questions",
+        "create questions",
+        "make questions",
+        "10 questions",
+        "quiz",
+        "exam questions",
+        "ولد أسئلة",
+        "انشئ أسئلة",
+        "أنشئ أسئلة",
+        "اسئلة",
+        "أسئلة",
+    ]
+
+    named_files = [filename for filename in filenames if filename and filename.lower() in normalized]
+    chapter_match = re.search(
+        r"(chapter|chapters|section|sections|الفصل|الفصول|القسم|الأقسام)\s+([\d,\sand\-و]+)",
+        normalized,
+    )
+
+    if any(keyword in normalized for keyword in compare_keywords):
+        return {
+            "intent": RetrievalIntent.COMPARE,
+            "named_files": named_files,
+            "section_hint": chapter_match.group(0) if chapter_match else None,
+        }
+
+    if any(keyword in normalized for keyword in question_gen_keywords):
+        return {
+            "intent": RetrievalIntent.GENERATE_QUESTIONS,
+            "named_files": named_files,
+            "section_hint": chapter_match.group(0) if chapter_match else None,
+        }
+
+    if any(keyword in normalized for keyword in summarize_keywords):
+        if named_files:
+            return {
+                "intent": RetrievalIntent.SUMMARIZE_NAMED,
+                "named_files": named_files,
+                "section_hint": chapter_match.group(0) if chapter_match else None,
+            }
+        if any(keyword in normalized for keyword in latest_keywords):
+            return {
+                "intent": RetrievalIntent.SUMMARIZE_LATEST,
+                "named_files": [],
+                "section_hint": chapter_match.group(0) if chapter_match else None,
+            }
+
+    return {
+        "intent": RetrievalIntent.SEMANTIC_QA,
+        "named_files": named_files,
+        "section_hint": chapter_match.group(0) if chapter_match else None,
+    }
+
+
 class RAGChatbot:
     """RAG-based chatbot that answers questions using indexed company documents."""
 
@@ -65,10 +149,8 @@ class RAGChatbot:
         logger.info("RAG Chatbot initialized")
 
     def retrieve_context(self, query: str, user_id: Optional[str] = None) -> Tuple[str, List[dict]]:
-        """Retrieve relevant context from the document store."""
         logger.info("Searching for: %s", query[:80])
         search_results = self.vs_manager.search_documents(query, user_id=user_id)
-
         if not search_results:
             logger.warning("No relevant documents found")
             return "", []
@@ -96,13 +178,9 @@ class RAGChatbot:
         language: str = "en",
         history: Optional[List[Dict[str, Any]]] = None,
     ) -> List:
-        """Build the message list for the LLM."""
         messages = [SystemMessage(content=SYSTEM_PROMPTS.get(language, SYSTEM_PROMPTS["en"]))]
         messages.extend(self._history_to_messages(history))
-
-        formatted_question = (
-            PROMPT_TEMPLATE.format(context=context, question=question) if context else question
-        )
+        formatted_question = PROMPT_TEMPLATE.format(context=context, question=question) if context else question
         messages.append(HumanMessage(content=formatted_question))
         return messages
 
@@ -117,10 +195,6 @@ class RAGChatbot:
         prefer_full_file_context: bool = False,
         on_response_complete: Optional[Callable[[str], None]] = None,
     ) -> Generator[str, None, None]:
-        """
-        Stream the response chunk by chunk.
-        Yields text chunks, then optionally ends with [CITATIONS]{...} JSON.
-        """
         logger.info("Stream query [%s]: %s", language, user_query[:80])
         try:
             context, sources = self.retrieve_context_with_filters(
@@ -159,11 +233,10 @@ class RAGChatbot:
                     ensure_ascii=False,
                 )
                 yield f"[CITATIONS]{sources_payload}"
-
         except Exception as e:
             logger.error("Stream error: %s", e)
             if language == "ar":
-                yield "عذرا، حدث خطأ أثناء معالجة طلبك. يرجى المحاولة مرة أخرى."
+                yield "عذراً، حدث خطأ أثناء معالجة طلبك. يرجى المحاولة مرة أخرى."
             else:
                 yield "Sorry, an error occurred while processing your request. Please try again."
 
@@ -177,7 +250,6 @@ class RAGChatbot:
         file_ids: Optional[List[str]] = None,
         prefer_full_file_context: bool = False,
     ) -> dict:
-        """Synchronous chat that collects the full streamed response."""
         logger.info("Chat query [%s]: %s", language, user_query[:80])
         try:
             context, sources = self.retrieve_context_with_filters(
@@ -189,7 +261,6 @@ class RAGChatbot:
             messages = self.build_messages(user_query, context, language, history)
             response = self.llm.invoke(messages)
             answer = response.content
-
             return {
                 "answer": answer,
                 "sources": sources if include_sources else None,
@@ -205,11 +276,9 @@ class RAGChatbot:
             }
 
     def clear_history(self):
-        """Compatibility method retained for API callers."""
         logger.info("Conversation history is client-managed; nothing to clear in memory")
 
     def get_conversation_summary(self) -> str:
-        """Compatibility method retained for API callers."""
         return "Conversation history is managed per request."
 
     def retrieve_context_with_filters(
@@ -219,22 +288,80 @@ class RAGChatbot:
         file_ids: Optional[List[str]] = None,
         prefer_full_file_context: bool = False,
     ) -> Tuple[str, List[dict]]:
-        """Retrieve relevant context from the document store with optional file filtering."""
         logger.info("Searching for: %s", query[:80])
-        if prefer_full_file_context and file_ids:
-            context, sources = self.retrieve_full_file_context(query, user_id=user_id, file_ids=file_ids)
+
+        available_filenames = self.vs_manager.list_user_source_files(user_id=user_id)
+        intent_result = detect_retrieval_intent(query, available_filenames=available_filenames)
+        intent = intent_result["intent"]
+        named_files = intent_result["named_files"]
+
+        resolved_file_ids = list(file_ids or [])
+        if named_files:
+            named_file_ids = self.vs_manager.get_file_ids_by_source_files(
+                user_id=user_id,
+                source_files=named_files,
+            )
+            for file_id in named_file_ids:
+                if file_id not in resolved_file_ids:
+                    resolved_file_ids.append(file_id)
+
+        if intent == RetrievalIntent.SUMMARIZE_LATEST:
+            latest_file_id = self.vs_manager.get_latest_file_id(user_id=user_id)
+            if not latest_file_id:
+                logger.warning("No latest document found for user %s", user_id)
+                return "", []
+            documents = self.vs_manager.get_documents_by_file_ids(user_id=user_id, file_ids=[latest_file_id])
+            return self._build_context_from_documents(documents)
+
+        if intent in {RetrievalIntent.SUMMARIZE_NAMED, RetrievalIntent.GENERATE_QUESTIONS}:
+            if not resolved_file_ids:
+                logger.warning("Document-scoped intent detected but no matching file was found")
+                return "", []
+            documents = self.vs_manager.get_documents_by_file_ids(
+                user_id=user_id,
+                file_ids=resolved_file_ids,
+            )
+            return self._build_context_from_documents(documents)
+
+        if intent == RetrievalIntent.COMPARE:
+            if len(resolved_file_ids) < 2:
+                logger.warning("Compare intent detected without at least two matching documents")
+                return "", []
+            merged_results: List[Tuple[Any, float]] = []
+            for compare_file_id in resolved_file_ids:
+                file_results = self.vs_manager.search_documents(
+                    query,
+                    top_k=max(settings.TOP_K_DOCUMENTS, 4),
+                    threshold=0.0,
+                    user_id=user_id,
+                    file_ids=[compare_file_id],
+                )
+                merged_results.extend(file_results)
+            if not merged_results:
+                logger.warning("No comparison results found")
+                return "", []
+            return self._build_context_from_results(merged_results)
+
+        if prefer_full_file_context and resolved_file_ids:
+            context, sources = self.retrieve_full_file_context(
+                query,
+                user_id=user_id,
+                file_ids=resolved_file_ids,
+            )
             if context:
-                logger.info("Using direct file context for %s matched file(s)", len(file_ids))
+                logger.info("Using direct file context for %s matched file(s)", len(resolved_file_ids))
                 return context, sources
 
-        search_results = self.vs_manager.search_documents(query, user_id=user_id, file_ids=file_ids)
-
+        search_results = self.vs_manager.search_documents(
+            query,
+            user_id=user_id,
+            file_ids=resolved_file_ids or None,
+        )
         if not search_results:
             logger.warning("No relevant documents found")
             return "", []
-
         context, sources = self._build_context_from_results(search_results)
-        logger.info("Found %s relevant documents", len(sources))
+        logger.info("Semantic QA found %s relevant documents", len(sources))
         return context, sources
 
     def retrieve_full_file_context(
@@ -243,7 +370,6 @@ class RAGChatbot:
         user_id: Optional[str] = None,
         file_ids: Optional[List[str]] = None,
     ) -> Tuple[str, List[dict]]:
-        """Build context directly from the matched file, not just semantic top-k chunks."""
         if not file_ids:
             return "", []
 
@@ -265,7 +391,7 @@ class RAGChatbot:
         def add_result(doc: Any, score: float) -> None:
             doc_key = (
                 str(doc.metadata.get("file_id", "")),
-                int(doc.metadata.get("page") or 0),
+                int(doc.metadata.get("page_number") or 1),
                 int(doc.metadata.get("chunk_index") or 0),
             )
             if doc_key in seen_keys:
@@ -283,8 +409,9 @@ class RAGChatbot:
         sources: List[dict] = []
         current_chars = 0
         for doc, score in merged_results:
-            source_name = doc.metadata.get("source", "Unknown")
-            part = f"[Source: {source_name} | Page: {doc.metadata.get('page', 0) + 1}]\n{doc.page_content}"
+            source_name = doc.metadata.get("source_file", doc.metadata.get("source", "Unknown"))
+            page_number = int(doc.metadata.get("page_number") or doc.metadata.get("page") or 1)
+            part = f"[Source: {source_name} | Page: {page_number}]\n{doc.page_content}"
             if context_parts and current_chars + len(part) > settings.FILE_CONTEXT_MAX_CHARS:
                 break
             context_parts.append(part)
@@ -292,7 +419,7 @@ class RAGChatbot:
             sources.append(
                 {
                     "source": source_name,
-                    "page": doc.metadata.get("page"),
+                    "page": page_number,
                     "score": float(score),
                     "content_preview": doc.page_content[:150],
                 }
@@ -300,23 +427,42 @@ class RAGChatbot:
 
         if not context_parts:
             return "", []
+        return "\n---\n".join(context_parts), sources
+
+    def _build_context_from_documents(self, documents: List[Any]) -> Tuple[str, List[dict]]:
+        if not documents:
+            return "", []
+
+        context_parts: List[str] = []
+        sources: List[dict] = []
+        for doc in documents:
+            source_name = doc.metadata.get("source_file") or doc.metadata.get("source", "Unknown")
+            page_number = int(doc.metadata.get("page_number") or doc.metadata.get("page") or 1)
+            context_parts.append(f"[Source: {source_name} | Page: {page_number}]\n{doc.page_content}")
+            sources.append(
+                {
+                    "source": source_name,
+                    "page": page_number,
+                    "score": 1.0,
+                    "content_preview": doc.page_content[:150],
+                }
+            )
 
         return "\n---\n".join(context_parts), sources
 
     def _build_context_from_results(self, search_results: List[Tuple[Any, float]]) -> Tuple[str, List[dict]]:
         context_parts: List[str] = []
         sources: List[dict] = []
-
         for doc, score in search_results:
-            source_name = doc.metadata.get("source", "Unknown")
-            context_parts.append(f"[Source: {source_name}]\n{doc.page_content}")
+            source_name = doc.metadata.get("source_file") or doc.metadata.get("source", "Unknown")
+            page_number = int(doc.metadata.get("page_number") or doc.metadata.get("page") or 1)
+            context_parts.append(f"[Source: {source_name} | Page: {page_number}]\n{doc.page_content}")
             sources.append(
                 {
                     "source": source_name,
-                    "page": doc.metadata.get("page"),
+                    "page": page_number,
                     "score": float(score),
                     "content_preview": doc.page_content[:150],
                 }
             )
-
         return "\n---\n".join(context_parts), sources

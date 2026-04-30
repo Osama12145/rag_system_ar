@@ -1,14 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
+import { toast } from "sonner";
+import { AlertCircle, CheckCircle2, FileText, Loader2, Search, Upload } from "lucide-react";
+
 import { AppShell } from "@/components/layout/AppShell";
 import { useI18n } from "@/lib/i18n";
-import { DocumentRecord, listDocuments, uploadDocument } from "@/lib/api";
-import { Upload, FileText, Loader2, CheckCircle2, Search, AlertCircle } from "lucide-react";
-import { toast } from "sonner";
+import { DocumentRecord, uploadDocument, useDocumentsQuery } from "@/lib/api";
 
 const Library = () => {
   const { t, lang } = useI18n();
+  const queryClient = useQueryClient();
   const [searchParams] = useSearchParams();
+  const { data, error } = useDocumentsQuery();
   const [docs, setDocs] = useState<DocumentRecord[]>([]);
   const [progress, setProgress] = useState<Record<string, number>>({});
   const [query, setQuery] = useState(searchParams.get("q") ?? "");
@@ -18,11 +22,16 @@ const Library = () => {
   }, [searchParams]);
 
   useEffect(() => {
-    listDocuments().then(({ docs, mocked }) => {
-      setDocs(docs);
-      if (mocked) toast.message(t("error_disconnected"));
-    });
-  }, [t]);
+    if (data?.docs) {
+      setDocs(data.docs);
+    }
+  }, [data?.docs]);
+
+  useEffect(() => {
+    if (error) {
+      toast.message(t("error_disconnected"));
+    }
+  }, [error, t]);
 
   const handleFiles = useCallback(
     async (files: FileList | null) => {
@@ -42,16 +51,12 @@ const Library = () => {
         setProgress((p) => ({ ...p, [tempId]: 0 }));
 
         try {
-          const { doc } = await uploadDocument(file, (pct) =>
-            setProgress((p) => ({ ...p, [tempId]: pct })),
-          );
+          const { doc } = await uploadDocument(file, (pct) => setProgress((p) => ({ ...p, [tempId]: pct })));
           setDocs((prev) => prev.map((d) => (d.id === tempId ? doc : d)));
-          toast.success(lang === "ar" ? `تمت فهرسة ${file.name}` : `Indexed ${file.name}`);
+          await queryClient.invalidateQueries({ queryKey: ["documents"] });
+          toast.success(lang === "ar" ? `تم قبول ${file.name} وبدأت معالجته` : `${file.name} accepted for processing`);
         } catch (err: unknown) {
-          // Mark the file as error and show a toast
-          setDocs((prev) =>
-            prev.map((d) => (d.id === tempId ? { ...d, status: "error" as const } : d)),
-          );
+          setDocs((prev) => prev.map((d) => (d.id === tempId ? { ...d, status: "error" as const } : d)));
           const msg = err instanceof Error ? err.message : String(err);
           toast.error(lang === "ar" ? `فشل رفع ${file.name}: ${msg}` : `Upload failed for ${file.name}: ${msg}`);
         } finally {
@@ -62,7 +67,7 @@ const Library = () => {
         }
       }
     },
-    [lang],
+    [lang, queryClient],
   );
 
   const filtered = docs.filter((d) => d.name.toLowerCase().includes(query.toLowerCase()));
@@ -88,7 +93,6 @@ const Library = () => {
           </label>
         </div>
 
-        {/* Dropzone */}
         <label
           onDragOver={(e) => e.preventDefault()}
           onDrop={(e) => {
@@ -108,21 +112,19 @@ const Library = () => {
             <Upload className="h-5 w-5" />
           </div>
           <div className="mt-3 text-sm font-medium text-foreground">{t("drop_here")}</div>
-          <div className="mt-1 text-xs text-muted-foreground">PDF · {lang === "ar" ? "حتى ٥٠ ميجابايت" : "up to 50 MB"}</div>
+          <div className="mt-1 text-xs text-muted-foreground">PDF آ· {lang === "ar" ? "حتى 50 ميجابايت" : "up to 50 MB"}</div>
         </label>
 
-        {/* Search */}
         <div className="relative mt-6">
           <Search className="absolute start-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder={lang === "ar" ? "ابحث عن مستند…" : "Search documents…"}
+            placeholder={lang === "ar" ? "ابحث عن مستند..." : "Search documents..."}
             className="h-10 w-full rounded-xl border border-border/60 bg-card/40 ps-9 pe-3 text-sm outline-none focus:border-primary/40"
           />
         </div>
 
-        {/* List */}
         <div className="mt-4 grid gap-3">
           {filtered.map((d) => {
             const pct = progress[d.id];
@@ -154,8 +156,7 @@ const Library = () => {
                     )}
                   </div>
                   <div className="mt-1 text-[11px] text-muted-foreground">
-                    {(d.size / 1_000_000).toFixed(1)} MB · {d.pages} {t("pages")} · {d.chunks} {t("chunks")} ·{" "}
-                    {d.uploadedAt}
+                    {(d.size / 1_000_000).toFixed(1)} MB آ· {d.pages} {t("pages")} آ· {d.chunks} {t("chunks")} آ· {d.uploadedAt}
                   </div>
                   {isIndexing && typeof pct === "number" && (
                     <div className="mt-2 h-1 w-full overflow-hidden rounded-full bg-muted/60">

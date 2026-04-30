@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import {
   Activity,
@@ -10,7 +10,7 @@ import {
   Zap,
 } from "lucide-react";
 
-import { getQdrantStatus, getTokenUsage } from "@/lib/api";
+import { useHealthQuery, useUsageQuery } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 
 type SidebarContentProps = {
@@ -21,13 +21,8 @@ type SidebarContentProps = {
 export function AppSidebarContent({ compact = false, onNavigate }: SidebarContentProps) {
   const { t } = useI18n();
   const location = useLocation();
-  const [qdrant, setQdrant] = useState({ active: true });
-  const [usage, setUsage] = useState({ used: 0, total: 1 });
-
-  useEffect(() => {
-    getQdrantStatus().then((r) => setQdrant({ active: r.active }));
-    getTokenUsage().then((r) => setUsage({ used: r.used, total: r.total }));
-  }, []);
+  const { data: health } = useHealthQuery();
+  const { data: usage } = useUsageQuery();
 
   const items = useMemo(
     () => [
@@ -38,7 +33,10 @@ export function AppSidebarContent({ compact = false, onNavigate }: SidebarConten
     [t],
   );
 
-  const usagePct = Math.min(100, Math.round((usage.used / Math.max(1, usage.total)) * 100));
+  const usagePct = Math.min(
+    100,
+    Math.round(((usage?.used ?? 0) / Math.max(1, usage?.total ?? 1)) * 100),
+  );
 
   return (
     <div className={`glass-strong flex h-full flex-col rounded-2xl ${compact ? "p-4" : "p-4"}`}>
@@ -83,17 +81,23 @@ export function AppSidebarContent({ compact = false, onNavigate }: SidebarConten
           </div>
           <span
             className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[10px] font-medium ${
-              qdrant.active ? "bg-success/15 text-success" : "bg-destructive/15 text-destructive"
+              health?.active ? "bg-success/15 text-success" : "bg-destructive/15 text-destructive"
             }`}
           >
             <span
               className={`h-1.5 w-1.5 rounded-full ${
-                qdrant.active ? "bg-success animate-pulse-glow" : "bg-destructive"
+                health?.active ? "bg-success animate-pulse-glow" : "bg-destructive"
               }`}
             />
-            {qdrant.active ? t("qdrant_active") : t("qdrant_offline")}
+            {health?.active ? t("qdrant_active") : t("qdrant_offline")}
           </span>
         </div>
+
+        {health?.degraded && (
+          <div className="mt-2 text-[10px] text-warning">
+            {t("qdrant_status")} {health.responseTimeMs}ms
+          </div>
+        )}
 
         <div className="mt-3 flex items-center justify-between text-xs text-muted-foreground">
           <span className="inline-flex items-center gap-1.5">
@@ -106,7 +110,7 @@ export function AppSidebarContent({ compact = false, onNavigate }: SidebarConten
           <div className="h-full rounded-full bg-gradient-primary transition-all" style={{ width: `${usagePct}%` }} />
         </div>
         <div className="mt-1.5 text-[10px] text-muted-foreground/80">
-          {(usage.used / 1000).toFixed(0)}k / {(usage.total / 1000).toFixed(0)}k tokens
+          {((usage?.used ?? 0) / 1000).toFixed(0)}k / {((usage?.total ?? 0) / 1000).toFixed(0)}k tokens
         </div>
       </div>
 

@@ -4,13 +4,14 @@ import { ArrowUpRight, Clock, MessageSquareText, Search } from "lucide-react";
 import { toast } from "sonner";
 
 import { AppShell } from "@/components/layout/AppShell";
-import { listSessions, Session } from "@/lib/api";
+import { Session, useSessionsQuery } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 
 const Interrogations = () => {
   const { t, lang } = useI18n();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
+  const { data, error } = useSessionsQuery();
   const [sessions, setSessions] = useState<Session[]>([]);
   const [query, setQuery] = useState(searchParams.get("q") ?? "");
 
@@ -19,13 +20,16 @@ const Interrogations = () => {
   }, [searchParams]);
 
   useEffect(() => {
-    listSessions().then(({ sessions, mocked }) => {
-      setSessions(sessions);
-      if (mocked) {
-        toast.message(t("error_disconnected"));
-      }
-    });
-  }, [t]);
+    if (data?.sessions) {
+      setSessions(data.sessions);
+    }
+  }, [data?.sessions]);
+
+  useEffect(() => {
+    if (error) {
+      toast.message(t("error_disconnected"));
+    }
+  }, [error, t]);
 
   const filteredSessions = useMemo(() => {
     const value = query.trim().toLowerCase();
@@ -71,8 +75,7 @@ const Interrogations = () => {
                   <div className="min-w-0">
                     <div className="truncate text-sm font-semibold text-foreground">{session.title}</div>
                     <div className="mt-0.5 inline-flex items-center gap-1 text-[11px] text-muted-foreground">
-                      <Clock className="h-3 w-3" /> {session.updatedAt} · {session.messageCount}{" "}
-                      {lang === "ar" ? "رسالة" : "messages"}
+                      <Clock className="h-3 w-3" /> {session.updatedAt} آ· {session.messageCount} {lang === "ar" ? "رسالة" : "messages"}
                     </div>
                   </div>
                 </div>
