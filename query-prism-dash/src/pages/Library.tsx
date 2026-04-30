@@ -51,12 +51,18 @@ const Library = () => {
         setProgress((prev) => ({ ...prev, [tempId]: job.progress }));
 
         if (job.status === "completed") {
-          await queryClient.invalidateQueries({ queryKey: ["documents"] });
           setDocs((prev) =>
             prev.map((doc) =>
-              doc.id === tempId ? (job.document ?? { ...doc, status: "ready" as const }) : doc,
+              doc.id === tempId
+                ? {
+                    ...(job.document ?? doc),
+                    id: tempId,
+                    status: "ready" as const,
+                  }
+                : doc,
             ),
           );
+          await queryClient.invalidateQueries({ queryKey: ["documents"] });
           toast.success(lang === "ar" ? `اكتملت فهرسة ${fileName}` : `${fileName} indexed successfully`);
           break;
         }
@@ -94,11 +100,9 @@ const Library = () => {
         setProgress((prev) => ({ ...prev, [tempId]: 0 }));
 
         try {
-          const { doc, jobId } = await uploadDocument(file, (pct) =>
+          const { jobId } = await uploadDocument(file, (pct) =>
             setProgress((prev) => ({ ...prev, [tempId]: pct })),
           );
-
-          setDocs((prev) => prev.map((d) => (d.id === tempId ? doc : d)));
 
           if (!jobId) {
             await queryClient.invalidateQueries({ queryKey: ["documents"] });
