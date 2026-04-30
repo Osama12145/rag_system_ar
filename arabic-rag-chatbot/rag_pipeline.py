@@ -98,6 +98,11 @@ def detect_retrieval_intent(query: str, available_filenames: Optional[List[str]]
         "تم رفعه",
         "المرفوع",
         "المرفوعه",
+        "attached file",
+        "attached document",
+        "the attached file",
+        "الملف المرفق",
+        "المرفق",
     ]
     compare_keywords = ["compare", "comparison", "difference between", "قارن", "مقارنة", "فرق بين", "الفرق بين"]
     question_gen_keywords = [
@@ -234,6 +239,11 @@ def refers_to_generic_uploaded_document(query: str) -> bool:
         "الملف المرفوع",
         "الوثيقة المرفوعة",
         "المرفوع",
+        "الملف المرفق",
+        "المرفق",
+        "attached file",
+        "attached document",
+        "the attached file",
     ]
     return any(
         normalize_intent_text(marker) in normalized_query
