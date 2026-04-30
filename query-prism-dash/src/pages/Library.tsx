@@ -6,7 +6,9 @@ import { AlertCircle, CheckCircle2, FileText, Loader2, Search, Upload } from "lu
 
 import { AppShell } from "@/components/layout/AppShell";
 import { useI18n } from "@/lib/i18n";
-import { DocumentRecord, uploadDocument, useDocumentsQuery } from "@/lib/api";
+import { DocumentRecord, getUploadStatus, uploadDocument, useDocumentsQuery } from "@/lib/api";
+
+const MAX_POLL_ATTEMPTS = 60;
 
 const Library = () => {
   const { t, lang } = useI18n();
@@ -33,9 +35,49 @@ const Library = () => {
     }
   }, [error, t]);
 
+  const pollUploadJob = useCallback(
+    async (jobId: string, tempId: string, fileName: string) => {
+      let attempts = 0;
+
+      while (true) {
+        attempts += 1;
+        if (attempts > MAX_POLL_ATTEMPTS) {
+          throw new Error(
+            lang === "ar" ? "انتهت مدة الانتظار، حاول مرة أخرى" : "Indexing timed out, please retry",
+          );
+        }
+
+        const job = await getUploadStatus(jobId);
+        setProgress((prev) => ({ ...prev, [tempId]: job.progress }));
+
+        if (job.status === "completed") {
+          await queryClient.invalidateQueries({ queryKey: ["documents"] });
+          setDocs((prev) =>
+            prev.map((doc) =>
+              doc.id === tempId ? (job.document ?? { ...doc, status: "ready" as const }) : doc,
+            ),
+          );
+          toast.success(lang === "ar" ? `اكتملت فهرسة ${fileName}` : `${fileName} indexed successfully`);
+          break;
+        }
+
+        if (job.status === "error") {
+          setDocs((prev) =>
+            prev.map((doc) => (doc.id === tempId ? { ...doc, status: "error" as const } : doc)),
+          );
+          throw new Error(job.message || "Upload job failed");
+        }
+
+        await new Promise((resolve) => window.setTimeout(resolve, 3000));
+      }
+    },
+    [lang, queryClient],
+  );
+
   const handleFiles = useCallback(
     async (files: FileList | null) => {
       if (!files) return;
+
       for (const file of Array.from(files)) {
         const tempId = `tmp-${Date.now()}-${file.name}`;
         const placeholder: DocumentRecord = {
@@ -47,27 +89,43 @@ const Library = () => {
           uploadedAt: new Date().toISOString().slice(0, 10),
           status: "indexing",
         };
+
         setDocs((prev) => [placeholder, ...prev]);
-        setProgress((p) => ({ ...p, [tempId]: 0 }));
+        setProgress((prev) => ({ ...prev, [tempId]: 0 }));
 
         try {
-          const { doc } = await uploadDocument(file, (pct) => setProgress((p) => ({ ...p, [tempId]: pct })));
+          const { doc, jobId } = await uploadDocument(file, (pct) =>
+            setProgress((prev) => ({ ...prev, [tempId]: pct })),
+          );
+
           setDocs((prev) => prev.map((d) => (d.id === tempId ? doc : d)));
-          await queryClient.invalidateQueries({ queryKey: ["documents"] });
-          toast.success(lang === "ar" ? `تم قبول ${file.name} وبدأت معالجته` : `${file.name} accepted for processing`);
+
+          if (!jobId) {
+            await queryClient.invalidateQueries({ queryKey: ["documents"] });
+            toast.success(lang === "ar" ? `تم قبول ${file.name}` : `${file.name} accepted`);
+            continue;
+          }
+
+          toast.success(
+            lang === "ar" ? `تم رفع ${file.name} وبدأت الفهرسة` : `${file.name} uploaded and indexing started`,
+          );
+
+          await pollUploadJob(jobId, tempId, file.name);
         } catch (err: unknown) {
-          setDocs((prev) => prev.map((d) => (d.id === tempId ? { ...d, status: "error" as const } : d)));
+          setDocs((prev) =>
+            prev.map((d) => (d.id === tempId ? { ...d, status: "error" as const } : d)),
+          );
           const msg = err instanceof Error ? err.message : String(err);
           toast.error(lang === "ar" ? `فشل رفع ${file.name}: ${msg}` : `Upload failed for ${file.name}: ${msg}`);
         } finally {
-          setProgress((p) => {
-            const { [tempId]: _, ...rest } = p;
+          setProgress((prev) => {
+            const { [tempId]: _, ...rest } = prev;
             return rest;
           });
         }
       }
     },
-    [lang, queryClient],
+    [lang, pollUploadJob, queryClient],
   );
 
   const filtered = docs.filter((d) => d.name.toLowerCase().includes(query.toLowerCase()));
@@ -112,7 +170,9 @@ const Library = () => {
             <Upload className="h-5 w-5" />
           </div>
           <div className="mt-3 text-sm font-medium text-foreground">{t("drop_here")}</div>
-          <div className="mt-1 text-xs text-muted-foreground">PDF آ· {lang === "ar" ? "حتى 50 ميجابايت" : "up to 50 MB"}</div>
+          <div className="mt-1 text-xs text-muted-foreground">
+            PDF آ· {lang === "ar" ? "حتى 50 ميجابايت" : "up to 50 MB"}
+          </div>
         </label>
 
         <div className="relative mt-6">
@@ -130,9 +190,14 @@ const Library = () => {
             const pct = progress[d.id];
             const isIndexing = d.status === "indexing";
             const isError = d.status === "error";
+
             return (
               <div key={d.id} className="glass-card flex flex-col gap-3 rounded-xl p-4 sm:flex-row sm:items-center">
-                <div className={`grid h-11 w-11 shrink-0 place-items-center rounded-xl text-primary ${isError ? "bg-destructive/10 text-destructive" : "bg-primary/10"}`}>
+                <div
+                  className={`grid h-11 w-11 shrink-0 place-items-center rounded-xl text-primary ${
+                    isError ? "bg-destructive/10 text-destructive" : "bg-primary/10"
+                  }`}
+                >
                   <FileText className="h-5 w-5" />
                 </div>
                 <div className="min-w-0 flex-1">
@@ -156,7 +221,8 @@ const Library = () => {
                     )}
                   </div>
                   <div className="mt-1 text-[11px] text-muted-foreground">
-                    {(d.size / 1_000_000).toFixed(1)} MB آ· {d.pages} {t("pages")} آ· {d.chunks} {t("chunks")} آ· {d.uploadedAt}
+                    {(d.size / 1_000_000).toFixed(1)} MB آ· {d.pages} {t("pages")} آ· {d.chunks} {t("chunks")} آ·{" "}
+                    {d.uploadedAt}
                   </div>
                   {isIndexing && typeof pct === "number" && (
                     <div className="mt-2 h-1 w-full overflow-hidden rounded-full bg-muted/60">
@@ -167,6 +233,7 @@ const Library = () => {
               </div>
             );
           })}
+
           {filtered.length === 0 && (
             <div className="glass-card grid place-items-center rounded-xl py-12 text-sm text-muted-foreground">
               {lang === "ar" ? "لا توجد مستندات." : "No documents."}
