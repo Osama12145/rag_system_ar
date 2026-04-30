@@ -266,6 +266,9 @@ def normalize_upload_filename(filename: Optional[str]) -> str:
 
 def normalize_search_text(value: str) -> str:
     lowered = unicodedata.normalize("NFC", (value or "").strip().lower())
+    lowered = re.sub(r"[\u064b-\u065f\u0670\u06d6-\u06ed]", "", lowered)
+    lowered = lowered.replace("\u0640", "")
+    lowered = re.sub(r"[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]", "", lowered)
     translation_table = str.maketrans(
         {
             "أ": "ا",
@@ -281,6 +284,29 @@ def normalize_search_text(value: str) -> str:
     lowered = lowered.translate(translation_table)
     lowered = re.sub(r"[^\w\u0600-\u06FF.\- ]+", " ", lowered, flags=re.UNICODE)
     return " ".join(lowered.split())
+
+
+def contains_blocked_arabic_term(query_text: str) -> bool:
+    normalized_query = normalize_search_text(query_text)
+    if not normalized_query:
+        return False
+
+    normalized_tokens = set(normalized_query.split())
+    for term in ARABIC_SLUR_BLOCKLIST:
+        normalized_term = normalize_search_text(term)
+        if not normalized_term:
+            continue
+
+        term_tokens = normalized_term.split()
+        if len(term_tokens) == 1:
+            if normalized_term in normalized_tokens:
+                return True
+            continue
+
+        if re.search(rf"(^|\s){re.escape(normalized_term)}($|\s)", normalized_query):
+            return True
+
+    return False
 
 
 def detect_query_language(query_text: str, ui_language: str = "en") -> str:
@@ -315,11 +341,9 @@ def validate_input(query_text: str, session_id: str) -> None:
             moderation_logger.warning("blocked: prompt_injection from %s", session_id)
             raise HTTPException(status_code=400, detail="هذا الطلب لا يمكن معالجته")
 
-    normalized_arabic = normalize_search_text(text_value)
-    for term in ARABIC_SLUR_BLOCKLIST:
-        if normalize_search_text(term) in normalized_arabic:
-            moderation_logger.warning("blocked: abusive_language from %s", session_id)
-            raise HTTPException(status_code=400, detail="هذا الطلب لا يمكن معالجته")
+    if contains_blocked_arabic_term(text_value):
+        moderation_logger.warning("blocked: abusive_language from %s", session_id)
+        raise HTTPException(status_code=400, detail="هذا الطلب لا يمكن معالجته")
 
 
 def is_document_inventory_query(query: str) -> bool:
@@ -697,7 +721,7 @@ async def chat(
 
         async def stream_response():
             try:
-                for chunk in chatbot.stream_chat(
+                async for chunk in chatbot.stream_chat(
                     user_query=user_message,
                     include_sources=request.sourceCheck,
                     language=detected_language,
@@ -772,8 +796,13 @@ async def get_chat_history(
         history: List[Dict[str, str]] = []
         for user_message, ai_response, timestamp in rows:
             iso_timestamp = timestamp.isoformat()
-            history.append({"role": "user", "content": user_message, "timestamp": iso_timestamp})
-            history.append({"role": "assistant", "content": ai_response, "timestamp": iso_timestamp})
+            history.append(
+                {
+                    "user_message": user_message,
+                    "ai_response": ai_response,
+                    "timestamp": iso_timestamp,
+                }
+            )
 
         return {"history": history, "message_count": len(rows), "session_id": selected_session_id}
     except Exception as e:

@@ -55,6 +55,12 @@ export type HistoryMessage = {
   timestamp?: string;
 };
 
+export type ChatHistoryExchange = {
+  user_message: string;
+  ai_response: string;
+  timestamp?: string;
+};
+
 export type StoredIdentity = {
   id: string;
   type: "guest" | "local";
@@ -95,7 +101,7 @@ type UploadResponse = {
 };
 
 type ChatHistoryResponse = {
-  history: HistoryMessage[];
+  history: ChatHistoryExchange[];
   message_count: number;
   session_id: string | null;
 };
@@ -325,7 +331,14 @@ export async function getChatHistory(
   }
   const { response } = await fetchWithTimeout(url.toString());
   const data = await parseJsonOrThrow<ChatHistoryResponse>(response);
-  return { history: data.history ?? [], sessionId: data.session_id };
+  const history = (data.history ?? []).flatMap((exchange) => {
+    const timestamp = exchange.timestamp;
+    return [
+      { role: "user" as const, content: exchange.user_message, timestamp },
+      { role: "assistant" as const, content: exchange.ai_response, timestamp },
+    ];
+  });
+  return { history, sessionId: data.session_id };
 }
 
 export async function clearChatHistory(sessionId?: string): Promise<void> {

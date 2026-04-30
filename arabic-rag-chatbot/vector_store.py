@@ -21,8 +21,10 @@ from qdrant_client.models import (
     PointStruct,
     VectorParams,
 )
+from sqlalchemy import text
 
 from config import settings
+from database import get_async_session
 
 logger = logging.getLogger(__name__)
 
@@ -348,24 +350,47 @@ class VectorStoreManager:
         if user_id:
             must_conditions.append(FieldCondition(key="user_id", match=MatchValue(value=user_id)))
 
-        points, _ = self.client.scroll(
-            collection_name=self.collection_name,
-            scroll_filter=Filter(must=must_conditions) if must_conditions else None,
-            limit=512,
-            with_payload=True,
-            with_vectors=False,
-        )
-
         latest_ts = ""
         latest_file_id = None
-        for point in points:
-            file_id = point.payload.get("file_id")
-            ts = point.payload.get("upload_timestamp", "")
-            if file_id and ts > latest_ts:
-                latest_ts = ts
-                latest_file_id = file_id
+        offset = None
+
+        while True:
+            points, offset = self.client.scroll(
+                collection_name=self.collection_name,
+                scroll_filter=Filter(must=must_conditions) if must_conditions else None,
+                limit=256,
+                with_payload=True,
+                with_vectors=False,
+                offset=offset,
+            )
+
+            for point in points:
+                file_id = point.payload.get("file_id")
+                ts = point.payload.get("upload_timestamp", "")
+                if file_id and ts > latest_ts:
+                    latest_ts = ts
+                    latest_file_id = file_id
+
+            if offset is None:
+                break
 
         return latest_file_id
+
+    async def get_latest_file_id_from_db(self, user_id: Optional[str] = None) -> Optional[str]:
+        async with get_async_session() as db:
+            result = await db.execute(
+                text(
+                    """
+                    SELECT file_id
+                    FROM file_metadata
+                    WHERE (:uid IS NULL OR user_id = :uid)
+                    ORDER BY upload_date DESC
+                    LIMIT 1
+                    """
+                ),
+                {"uid": user_id},
+            )
+            return result.scalar_one_or_none()
 
     def delete_all_documents(self) -> bool:
         try:

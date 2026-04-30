@@ -8,7 +8,7 @@ from enum import Enum
 import json
 import logging
 import re
-from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
+from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.prompts import PromptTemplate
@@ -56,8 +56,27 @@ class RetrievalIntent(str, Enum):
     SEMANTIC_QA = "SEMANTIC_QA"
 
 
+def normalize_intent_text(value: str) -> str:
+    normalized = (value or "").strip().lower()
+    translation_table = str.maketrans(
+        {
+            "أ": "ا",
+            "إ": "ا",
+            "آ": "ا",
+            "ٱ": "ا",
+            "ى": "ي",
+            "ئ": "ي",
+            "ؤ": "و",
+            "ة": "ه",
+        }
+    )
+    normalized = normalized.translate(translation_table)
+    normalized = re.sub(r"[^\w\u0600-\u06FF.\- ]+", " ", normalized, flags=re.UNICODE)
+    return " ".join(normalized.split())
+
+
 def detect_retrieval_intent(query: str, available_filenames: Optional[List[str]] = None) -> Dict[str, Any]:
-    normalized = (query or "").strip().lower()
+    normalized = normalize_intent_text(query)
     filenames = available_filenames or []
 
     summarize_keywords = ["summarize", "summarise", "summary", "ملخص", "لخص", "اختصر"]
@@ -67,21 +86,32 @@ def detect_retrieval_intent(query: str, available_filenames: Optional[List[str]]
         "last uploaded",
         "newest",
         "uploaded file",
-        "آخر ملف",
         "اخر ملف",
-        "أحدث ملف",
         "احدث ملف",
-        "آخر وثيقة",
+        "اخر وثيقه",
         "اخر وثيقة",
+        "احدث وثيقه",
+        "latest file",
+        "recent file",
+        "last file",
+        "most recently uploaded file",
+        "تم رفعه",
+        "المرفوع",
+        "المرفوعه",
     ]
     compare_keywords = ["compare", "comparison", "difference between", "قارن", "مقارنة", "فرق بين", "الفرق بين"]
     question_gen_keywords = [
         "generate questions",
         "create questions",
         "make questions",
+        "5 questions",
         "10 questions",
         "quiz",
         "exam questions",
+        "اطرح",
+        "اطرح لي",
+        "اسال",
+        "اسأل",
         "ولد أسئلة",
         "انشئ أسئلة",
         "أنشئ أسئلة",
@@ -89,34 +119,38 @@ def detect_retrieval_intent(query: str, available_filenames: Optional[List[str]]
         "أسئلة",
     ]
 
-    named_files = [filename for filename in filenames if filename and filename.lower() in normalized]
+    named_files = [
+        filename
+        for filename in filenames
+        if filename and normalize_intent_text(filename) in normalized
+    ]
     chapter_match = re.search(
-        r"(chapter|chapters|section|sections|الفصل|الفصول|القسم|الأقسام)\s+([\d,\sand\-و]+)",
+        r"(chapter|chapters|section|sections|الفصل|الفصول|القسم|الاقسام)\s+([\d,\sand\-و]+)",
         normalized,
     )
 
-    if any(keyword in normalized for keyword in compare_keywords):
+    if any(normalize_intent_text(keyword) in normalized for keyword in compare_keywords):
         return {
             "intent": RetrievalIntent.COMPARE,
             "named_files": named_files,
             "section_hint": chapter_match.group(0) if chapter_match else None,
         }
 
-    if any(keyword in normalized for keyword in question_gen_keywords):
+    if any(normalize_intent_text(keyword) in normalized for keyword in question_gen_keywords):
         return {
             "intent": RetrievalIntent.GENERATE_QUESTIONS,
             "named_files": named_files,
             "section_hint": chapter_match.group(0) if chapter_match else None,
         }
 
-    if any(keyword in normalized for keyword in summarize_keywords):
+    if any(normalize_intent_text(keyword) in normalized for keyword in summarize_keywords):
         if named_files:
             return {
                 "intent": RetrievalIntent.SUMMARIZE_NAMED,
                 "named_files": named_files,
                 "section_hint": chapter_match.group(0) if chapter_match else None,
             }
-        if any(keyword in normalized for keyword in latest_keywords):
+        if any(normalize_intent_text(keyword) in normalized for keyword in latest_keywords):
             return {
                 "intent": RetrievalIntent.SUMMARIZE_LATEST,
                 "named_files": [],
@@ -128,6 +162,83 @@ def detect_retrieval_intent(query: str, available_filenames: Optional[List[str]]
         "named_files": named_files,
         "section_hint": chapter_match.group(0) if chapter_match else None,
     }
+
+
+def resolve_compare_target_filenames(query: str, available_filenames: Optional[List[str]] = None) -> List[str]:
+    normalized_query = normalize_intent_text(query)
+    filenames = available_filenames or []
+    if not filenames:
+        return []
+
+    arabic_markers = ["ملف عربي", "الملف العربي", "العربي", "وثيقه عربيه", "وثيقة عربية"]
+    english_markers = ["ملف انجليزي", "الملف الانجليزي", "الانجليزي", "وثيقه انجليزيه", "وثيقة انجليزية"]
+
+    def looks_arabic_file(name: str) -> bool:
+        normalized_name = normalize_intent_text(name)
+        return bool(re.search(r"[\u0600-\u06FF]", name)) or "arabic" in normalized_name or " ar " in f" {normalized_name} "
+
+    def looks_english_file(name: str) -> bool:
+        normalized_name = normalize_intent_text(name)
+        return "english" in normalized_name or " en " in f" {normalized_name} "
+
+    def file_score(name: str) -> int:
+        normalized_name = normalize_intent_text(name)
+        score = 0
+        if looks_arabic_file(name):
+            score += 2
+        if looks_english_file(name):
+            score += 2
+        if re.search(r"[\u0600-\u06FF]", name):
+            score += 1
+        if re.search(r"[A-Za-z]", name):
+            score += 1
+        return score
+
+    chosen: List[str] = []
+    if any(marker in normalized_query for marker in arabic_markers):
+        arabic_candidates = [
+            filename
+            for filename in filenames
+            if looks_arabic_file(filename)
+        ]
+        if arabic_candidates:
+            chosen.append(max(arabic_candidates, key=file_score))
+
+    if any(marker in normalized_query for marker in english_markers):
+        english_candidates = [
+            filename
+            for filename in filenames
+            if looks_english_file(filename)
+        ]
+        if english_candidates:
+            english_match = max(english_candidates, key=file_score)
+            if english_match not in chosen:
+                chosen.append(english_match)
+
+    if len(chosen) < 2:
+        latest_keywords = ["اخر ملفين", "احدث ملفين", "last two", "latest two"]
+        if any(keyword in normalized_query for keyword in latest_keywords):
+            remaining = [filename for filename in filenames if filename not in chosen]
+            chosen += remaining[: 2 - len(chosen)]
+
+    return chosen
+
+
+def refers_to_generic_uploaded_document(query: str) -> bool:
+    normalized_query = normalize_intent_text(query)
+    generic_uploaded_markers = [
+        "uploaded file",
+        "uploaded document",
+        "the uploaded file",
+        "the uploaded document",
+        "الملف المرفوع",
+        "الوثيقة المرفوعة",
+        "المرفوع",
+    ]
+    return any(
+        normalize_intent_text(marker) in normalized_query
+        for marker in generic_uploaded_markers
+    )
 
 
 class RAGChatbot:
@@ -181,10 +292,16 @@ class RAGChatbot:
         messages = [SystemMessage(content=SYSTEM_PROMPTS.get(language, SYSTEM_PROMPTS["en"]))]
         messages.extend(self._history_to_messages(history))
         formatted_question = PROMPT_TEMPLATE.format(context=context, question=question) if context else question
+        response_language_instruction = (
+            "أجب باللغة العربية فقط."
+            if language == "ar"
+            else "Respond in English only."
+        )
+        formatted_question = f"{response_language_instruction}\n\n{formatted_question}"
         messages.append(HumanMessage(content=formatted_question))
         return messages
 
-    def stream_chat(
+    async def stream_chat(
         self,
         user_query: str,
         include_sources: bool = True,
@@ -194,10 +311,10 @@ class RAGChatbot:
         file_ids: Optional[List[str]] = None,
         prefer_full_file_context: bool = False,
         on_response_complete: Optional[Callable[[str], None]] = None,
-    ) -> Generator[str, None, None]:
+    ) -> AsyncGenerator[str, None]:
         logger.info("Stream query [%s]: %s", language, user_query[:80])
         try:
-            context, sources = self.retrieve_context_with_filters(
+            context, sources = await self.retrieve_context_with_filters(
                 user_query,
                 user_id=user_id,
                 file_ids=file_ids,
@@ -240,7 +357,7 @@ class RAGChatbot:
             else:
                 yield "Sorry, an error occurred while processing your request. Please try again."
 
-    def chat(
+    async def chat(
         self,
         user_query: str,
         include_sources: bool = True,
@@ -252,7 +369,7 @@ class RAGChatbot:
     ) -> dict:
         logger.info("Chat query [%s]: %s", language, user_query[:80])
         try:
-            context, sources = self.retrieve_context_with_filters(
+            context, sources = await self.retrieve_context_with_filters(
                 user_query,
                 user_id=user_id,
                 file_ids=file_ids,
@@ -281,7 +398,7 @@ class RAGChatbot:
     def get_conversation_summary(self) -> str:
         return "Conversation history is managed per request."
 
-    def retrieve_context_with_filters(
+    async def retrieve_context_with_filters(
         self,
         query: str,
         user_id: Optional[str] = None,
@@ -305,8 +422,22 @@ class RAGChatbot:
                 if file_id not in resolved_file_ids:
                     resolved_file_ids.append(file_id)
 
+        if intent == RetrievalIntent.COMPARE and len(resolved_file_ids) < 2:
+            compare_target_filenames = resolve_compare_target_filenames(query, available_filenames=available_filenames)
+            if compare_target_filenames:
+                compare_file_ids = self.vs_manager.get_file_ids_by_source_files(
+                    user_id=user_id,
+                    source_files=compare_target_filenames,
+                )
+                for file_id in compare_file_ids:
+                    if file_id not in resolved_file_ids:
+                        resolved_file_ids.append(file_id)
+
         if intent == RetrievalIntent.SUMMARIZE_LATEST:
             latest_file_id = self.vs_manager.get_latest_file_id(user_id=user_id)
+            if not latest_file_id:
+                logger.warning("Qdrant latest document lookup failed for user %s, falling back to DB", user_id)
+                latest_file_id = await self.vs_manager.get_latest_file_id_from_db(user_id=user_id)
             if not latest_file_id:
                 logger.warning("No latest document found for user %s", user_id)
                 return "", []
@@ -314,6 +445,18 @@ class RAGChatbot:
             return self._build_context_from_documents(documents)
 
         if intent in {RetrievalIntent.SUMMARIZE_NAMED, RetrievalIntent.GENERATE_QUESTIONS}:
+            if not resolved_file_ids:
+                if intent == RetrievalIntent.GENERATE_QUESTIONS and refers_to_generic_uploaded_document(query):
+                    latest_file_id = self.vs_manager.get_latest_file_id(user_id=user_id)
+                    if not latest_file_id:
+                        logger.warning(
+                            "Qdrant latest document lookup failed for question generation, falling back to DB for user %s",
+                            user_id,
+                        )
+                        latest_file_id = await self.vs_manager.get_latest_file_id_from_db(user_id=user_id)
+                    if latest_file_id:
+                        resolved_file_ids.append(latest_file_id)
+
             if not resolved_file_ids:
                 logger.warning("Document-scoped intent detected but no matching file was found")
                 return "", []
