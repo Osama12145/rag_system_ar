@@ -286,14 +286,7 @@ class DocumentProcessor:
                 scanned_candidates.append((page_num, page, text))
 
             scanned_ratio = (len(scanned_candidates) / page_count) if page_count else 0.0
-            should_use_remote_ocr = (
-                self._use_remote_ocr()
-                and scanned_candidates
-                and (
-                    scanned_ratio >= settings.OCR_REMOTE_SCANNED_RATIO_THRESHOLD
-                    or total_native_chars < settings.OCR_REMOTE_MIN_NATIVE_CHARS
-                )
-            )
+            should_use_remote_ocr = self._use_remote_ocr() and scanned_candidates
 
             if should_use_remote_ocr:
                 try:
