@@ -111,6 +111,7 @@ const IDENTITIES_STORAGE_KEY = "os-ai-identities";
 const CURRENT_IDENTITY_STORAGE_KEY = "os-ai-current-identity-id";
 const ACTIVE_SESSION_STORAGE_KEY = "os-ai-active-session-id";
 const DOCUMENT_UPLOAD_TIMEOUT_MS = 10 * 60 * 1000;
+const UPLOAD_STATUS_TIMEOUT_MS = 15_000;
 const HEALTH_TIMEOUT_MS = 8_000;
 const DEGRADED_RESPONSE_THRESHOLD_MS = 5_000;
 
@@ -312,7 +313,11 @@ export async function uploadDocument(
 }
 
 export async function getUploadStatus(jobId: string): Promise<UploadStatus> {
-  const { response } = await fetchWithTimeout(`${API_BASE}/api/upload/status/${encodeURIComponent(jobId)}`);
+  const { response } = await fetchWithTimeout(
+    `${API_BASE}/api/upload/status/${encodeURIComponent(jobId)}`,
+    undefined,
+    UPLOAD_STATUS_TIMEOUT_MS,
+  );
   return parseJsonOrThrow<UploadStatus>(response);
 }
 

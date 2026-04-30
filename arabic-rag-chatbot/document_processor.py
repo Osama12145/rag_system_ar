@@ -326,7 +326,11 @@ class DocumentProcessor:
                 if ocr_ready:
                     logger.info("Page %s in %s has low extractable text, running OCR", page_num + 1, file_path.name)
                     try:
-                        ocr_text = self._extract_ocr_text(page, file_path.name)
+                        ocr_text = await asyncio.to_thread(
+                            self._extract_ocr_text,
+                            page,
+                            file_path.name,
+                        )
                     except Exception as ocr_error:
                         logger.warning("OCR failed on page %s in %s: %s", page_num + 1, file_path.name, ocr_error)
                         ocr_text = ""
