@@ -34,7 +34,7 @@ export function MessageList({
                 : "glass-card text-foreground"
             }`}
           >
-            <div className="whitespace-pre-wrap">
+            <div className="whitespace-pre-wrap" dir="auto">
               {renderMarkdownLite(m.content)}
               {m.streaming && <span className="ms-1 inline-block h-3 w-[2px] translate-y-[2px] bg-primary animate-blink" />}
             </div>
