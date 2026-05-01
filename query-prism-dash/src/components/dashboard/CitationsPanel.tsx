@@ -16,13 +16,13 @@ export function CitationsPanel({ open, citations, active, onClose, onSelect }: P
 
   return (
     <aside
-      className={`fixed inset-y-0 end-0 z-30 w-full max-w-sm transform border-s border-border/40 bg-background/80 backdrop-blur-2xl transition-transform duration-300 ease-out md:max-w-md ${
+      className={`fixed inset-y-0 end-0 z-[70] w-full max-w-sm transform border-s border-border/40 bg-background/95 backdrop-blur-2xl transition-transform duration-300 ease-out md:max-w-md ${
         open ? "translate-x-0 rtl:-translate-x-0" : "translate-x-full rtl:-translate-x-full"
       }`}
       aria-hidden={!open}
     >
       <div className="flex h-full flex-col">
-        <header className="flex items-center justify-between border-b border-border/40 px-5 py-4">
+        <header className="sticky top-0 z-10 flex items-center justify-between border-b border-border/40 bg-background/95 px-5 py-4 backdrop-blur-2xl">
           <div className="flex items-center gap-2">
             <Sparkles className="h-4 w-4 text-primary" />
             <h2 className="text-sm font-semibold text-foreground">{t("citation_panel_title")}</h2>
