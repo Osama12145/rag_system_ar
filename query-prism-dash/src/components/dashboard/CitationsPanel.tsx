@@ -1,6 +1,7 @@
+import { FileText, Sparkles, X } from "lucide-react";
+
 import { Citation } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
-import { X, FileText, Sparkles } from "lucide-react";
 
 type Props = {
   open: boolean;
@@ -64,10 +65,13 @@ export function CitationsPanel({ open, citations, active, onClose, onSelect }: P
                     </div>
                     <div className="mt-1 text-[11px] text-muted-foreground">
                       {t("page")} {c.page}
-                      {typeof c.score === "number" && <span> · score {(c.score * 100).toFixed(0)}%</span>}
+                      {typeof c.score === "number" && <span> | score {(c.score * 100).toFixed(0)}%</span>}
                     </div>
-                    <div className="mt-3 rounded-lg border-s-2 border-primary/60 bg-background/40 px-3 py-2 text-xs italic leading-relaxed text-foreground/90">
-                      “{c.snippet}”
+                    <div
+                      dir="auto"
+                      className="mt-3 rounded-lg border-s-2 border-primary/60 bg-background/40 px-3 py-2 text-xs italic leading-relaxed text-foreground/90"
+                    >
+                      "{c.snippet}"
                     </div>
                   </button>
                 </li>

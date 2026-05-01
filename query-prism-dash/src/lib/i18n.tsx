@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState, ReactNode, useCallback } from "react";
+import { createContext, useCallback, useContext, useEffect, useState, ReactNode } from "react";
 
 export type Lang = "en" | "ar";
 
@@ -13,7 +13,7 @@ const DICT: Dict = {
   nav_settings: { en: "Settings", ar: "الإعدادات" },
   greeting: {
     en: "Welcome to OS_AI Center.",
-    ar: "مرحبًا بك في مركز OS_AI.",
+    ar: "مرحبا بك في مركز OS_AI.",
   },
   greeting_sub: {
     en: "How can I assist you today?",
@@ -22,21 +22,21 @@ const DICT: Dict = {
   card_summary_title: { en: "Document Summary", ar: "ملخص المستندات" },
   card_summary_desc: {
     en: "Summarize the latest uploaded file in seconds.",
-    ar: "لخّص آخر ملف تم رفعه في ثوانٍ.",
+    ar: "لخص آخر ملف تم رفعه في ثوان.",
   },
   card_multilingual_title: { en: "Multilingual RAG", ar: "بحث متعدد اللغات" },
   card_multilingual_desc: {
-    en: "Ask in Arabic or English — powered by Cohere embeddings.",
-    ar: "اسأل بالعربية أو الإنجليزية — مدعوم بنماذج Cohere.",
+    en: "Ask in Arabic or English with multilingual retrieval grounded in your documents.",
+    ar: "اسأل بالعربية أو الإنجليزية مع استرجاع متعدد اللغة مستند إلى وثائقك.",
   },
   card_policy_title: { en: "Policy Search", ar: "بحث السياسات" },
   card_policy_desc: {
     en: "Query internal policies and legal documents instantly.",
-    ar: "ابحث في السياسات والوثائق القانونية الداخلية فورًا.",
+    ar: "ابحث في السياسات والوثائق القانونية الداخلية فورا.",
   },
   prompt_placeholder: {
-    en: "Ask anything about your company documents…",
-    ar: "اسأل عن أي شيء في مستندات شركتك…",
+    en: "Ask anything about your company documents...",
+    ar: "اسأل عن أي شيء في مستندات شركتك...",
   },
   chip_source: { en: "Source Check", ar: "التحقق من المصدر" },
   chip_research: { en: "Deep Research", ar: "بحث متعمق" },
@@ -56,7 +56,7 @@ const DICT: Dict = {
     en: "Drop PDFs here or click to upload",
     ar: "أسقط ملفات PDF هنا أو انقر للرفع",
   },
-  indexing: { en: "Indexing into Qdrant…", ar: "جاري الفهرسة في Qdrant…" },
+  indexing: { en: "Indexing into Qdrant...", ar: "جار الفهرسة في Qdrant..." },
   ready: { en: "Ready", ar: "جاهز" },
   pages: { en: "pages", ar: "صفحة" },
   chunks: { en: "chunks", ar: "أجزاء" },
@@ -71,8 +71,11 @@ const DICT: Dict = {
     en: "Citations will appear here when the assistant cites documents.",
     ar: "ستظهر الاقتباسات هنا عندما يستشهد المساعد بالمستندات.",
   },
-  thinking: { en: "Thinking…", ar: "جاري التفكير…" },
-  error_disconnected: { en: "Server disconnected — using local mock data.", ar: "الخادم غير متصل — يتم استخدام بيانات محلية." },
+  thinking: { en: "Thinking...", ar: "جار التفكير..." },
+  error_disconnected: {
+    en: "Server disconnected - using local mock data.",
+    ar: "الخادم غير متصل - يتم استخدام بيانات محلية.",
+  },
   error_token_limit: { en: "Token limit reached.", ar: "تم الوصول إلى حد الرموز." },
   page: { en: "Page", ar: "صفحة" },
 };
@@ -90,9 +93,9 @@ const I18nContext = createContext<Ctx | null>(null);
 export function I18nProvider({ children }: { children: ReactNode }) {
   const [lang, setLangState] = useState<Lang>("en");
 
-  const setLang = useCallback((l: Lang) => {
-    setLangState(l);
-    localStorage.setItem("cib-lang", l);
+  const setLang = useCallback((value: Lang) => {
+    setLangState(value);
+    localStorage.setItem("cib-lang", value);
   }, []);
 
   useEffect(() => {

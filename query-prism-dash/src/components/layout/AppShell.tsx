@@ -1,8 +1,14 @@
 import { ReactNode } from "react";
+
+import { useI18n } from "@/lib/i18n";
+
 import { AppSidebar } from "./AppSidebar";
 import { TopBar } from "./TopBar";
 
 export function AppShell({ children }: { children: ReactNode }) {
+  const { lang } = useI18n();
+  const footerLabel = lang === "ar" ? "منصة RAG للمؤسسة" : "Enterprise RAG Platform";
+
   return (
     <div className="relative flex h-dvh w-full flex-col overflow-x-hidden bg-background text-foreground">
       <div className="ambient-orb -left-40 -top-40 h-[520px] w-[520px] bg-primary/30" />
@@ -17,12 +23,12 @@ export function AppShell({ children }: { children: ReactNode }) {
             <TopBar />
           </div>
 
-          <main className="flex-1 overflow-hidden px-4 pb-8 pt-4 md:px-10 md:pb-10 md:pt-6">
-            <div className="flex h-full min-h-0 flex-col">{children}</div>
+          <main className="flex-1 overflow-y-auto overflow-x-hidden px-4 pb-10 pt-4 md:px-10 md:pb-12 md:pt-6">
+            <div className="flex min-h-full min-w-0 flex-col">{children}</div>
           </main>
 
           <footer className="shrink-0 px-4 py-4 text-center text-xs text-muted-foreground/70 md:px-10">
-            آ© {new Date().getFullYear()} OS_AI آ· Enterprise RAG Platform
+            (c) {new Date().getFullYear()} OS_AI | {footerLabel}
           </footer>
         </div>
       </div>

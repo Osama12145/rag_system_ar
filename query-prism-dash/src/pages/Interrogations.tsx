@@ -75,7 +75,7 @@ const Interrogations = () => {
                   <div className="min-w-0">
                     <div className="truncate text-sm font-semibold text-foreground">{session.title}</div>
                     <div className="mt-0.5 inline-flex items-center gap-1 text-[11px] text-muted-foreground">
-                      <Clock className="h-3 w-3" /> {session.updatedAt} آ· {session.messageCount} {lang === "ar" ? "رسالة" : "messages"}
+                      <Clock className="h-3 w-3" /> {session.updatedAt} | {session.messageCount} {lang === "ar" ? "رسالة" : "messages"}
                     </div>
                   </div>
                 </div>

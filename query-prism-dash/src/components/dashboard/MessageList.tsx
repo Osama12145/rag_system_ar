@@ -1,5 +1,6 @@
-import { Citation } from "@/lib/api";
 import { FileText } from "lucide-react";
+
+import { Citation } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 
 type Msg = {
@@ -57,7 +58,7 @@ export function MessageList({
                       </span>
                       <FileText className="h-3 w-3 text-primary" />
                       <span className="truncate">
-                        {c.document} · {t("page")} {c.page}
+                        {c.document} | {t("page")} {c.page}
                       </span>
                     </button>
                   ))}
@@ -74,23 +75,32 @@ export function MessageList({
   );
 }
 
-// Tiny markdown subset: **bold** and _italic_
 function renderMarkdownLite(text: string) {
   const parts: (string | JSX.Element)[] = [];
   const regex = /(\*\*[^*]+\*\*|_[^_]+_)/g;
   let last = 0;
   let key = 0;
-  let m: RegExpExecArray | null;
-  while ((m = regex.exec(text)) !== null) {
-    if (m.index > last) parts.push(text.slice(last, m.index));
-    const token = m[0];
+  let match: RegExpExecArray | null;
+
+  while ((match = regex.exec(text)) !== null) {
+    if (match.index > last) parts.push(text.slice(last, match.index));
+    const token = match[0];
     if (token.startsWith("**")) {
-      parts.push(<strong key={key++} className="font-semibold text-primary">{token.slice(2, -2)}</strong>);
+      parts.push(
+        <strong key={key++} className="font-semibold text-primary">
+          {token.slice(2, -2)}
+        </strong>,
+      );
     } else {
-      parts.push(<em key={key++} className="text-muted-foreground">{token.slice(1, -1)}</em>);
+      parts.push(
+        <em key={key++} className="text-muted-foreground">
+          {token.slice(1, -1)}
+        </em>,
+      );
     }
-    last = m.index + token.length;
+    last = match.index + token.length;
   }
+
   if (last < text.length) parts.push(text.slice(last));
   return parts;
 }

@@ -5,8 +5,8 @@ import { toast } from "sonner";
 import { AlertCircle, CheckCircle2, FileText, Loader2, Search, Upload } from "lucide-react";
 
 import { AppShell } from "@/components/layout/AppShell";
-import { useI18n } from "@/lib/i18n";
 import { DocumentRecord, getUploadStatus, uploadDocument, useDocumentsQuery } from "@/lib/api";
+import { useI18n } from "@/lib/i18n";
 
 const MAX_POLL_ATTEMPTS = 60;
 
@@ -117,10 +117,10 @@ const Library = () => {
           await pollUploadJob(jobId, tempId, file.name);
         } catch (err: unknown) {
           setDocs((prev) =>
-            prev.map((d) => (d.id === tempId ? { ...d, status: "error" as const } : d)),
+            prev.map((doc) => (doc.id === tempId ? { ...doc, status: "error" as const } : doc)),
           );
-          const msg = err instanceof Error ? err.message : String(err);
-          toast.error(lang === "ar" ? `فشل رفع ${file.name}: ${msg}` : `Upload failed for ${file.name}: ${msg}`);
+          const message = err instanceof Error ? err.message : String(err);
+          toast.error(lang === "ar" ? `فشل رفع ${file.name}: ${message}` : `Upload failed for ${file.name}: ${message}`);
         } finally {
           setProgress((prev) => {
             const { [tempId]: _, ...rest } = prev;
@@ -132,7 +132,7 @@ const Library = () => {
     [lang, pollUploadJob, queryClient],
   );
 
-  const filtered = docs.filter((d) => d.name.toLowerCase().includes(query.toLowerCase()));
+  const filtered = docs.filter((doc) => doc.name.toLowerCase().includes(query.toLowerCase()));
 
   return (
     <AppShell>
@@ -150,16 +150,16 @@ const Library = () => {
               accept=".pdf,.txt,.docx,application/pdf,text/plain,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
               multiple
               className="hidden"
-              onChange={(e) => handleFiles(e.target.files)}
+              onChange={(event) => handleFiles(event.target.files)}
             />
           </label>
         </div>
 
         <label
-          onDragOver={(e) => e.preventDefault()}
-          onDrop={(e) => {
-            e.preventDefault();
-            handleFiles(e.dataTransfer.files);
+          onDragOver={(event) => event.preventDefault()}
+          onDrop={(event) => {
+            event.preventDefault();
+            handleFiles(event.dataTransfer.files);
           }}
           className="glass-card group mt-6 grid cursor-pointer place-items-center rounded-2xl border-2 border-dashed border-border/60 px-6 py-10 text-center transition-colors hover:border-primary/50"
         >
@@ -168,35 +168,33 @@ const Library = () => {
             accept=".pdf,.txt,.docx,application/pdf,text/plain,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             multiple
             className="hidden"
-            onChange={(e) => handleFiles(e.target.files)}
+            onChange={(event) => handleFiles(event.target.files)}
           />
           <div className="grid h-12 w-12 place-items-center rounded-2xl bg-primary/10 text-primary">
             <Upload className="h-5 w-5" />
           </div>
           <div className="mt-3 text-sm font-medium text-foreground">{t("drop_here")}</div>
-          <div className="mt-1 text-xs text-muted-foreground">
-            PDF آ· {lang === "ar" ? "حتى 50 ميجابايت" : "up to 50 MB"}
-          </div>
+          <div className="mt-1 text-xs text-muted-foreground">PDF | {lang === "ar" ? "حتى 50 ميجابايت" : "up to 50 MB"}</div>
         </label>
 
         <div className="relative mt-6">
           <Search className="absolute start-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <input
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={(event) => setQuery(event.target.value)}
             placeholder={lang === "ar" ? "ابحث عن مستند..." : "Search documents..."}
             className="h-10 w-full rounded-xl border border-border/60 bg-card/40 ps-9 pe-3 text-sm outline-none focus:border-primary/40"
           />
         </div>
 
         <div className="mt-4 grid gap-3">
-          {filtered.map((d) => {
-            const pct = progress[d.id];
-            const isIndexing = d.status === "indexing";
-            const isError = d.status === "error";
+          {filtered.map((doc) => {
+            const pct = progress[doc.id];
+            const isIndexing = doc.status === "indexing";
+            const isError = doc.status === "error";
 
             return (
-              <div key={d.id} className="glass-card flex flex-col gap-3 rounded-xl p-4 sm:flex-row sm:items-center">
+              <div key={doc.id} className="glass-card flex flex-col gap-3 rounded-xl p-4 sm:flex-row sm:items-center">
                 <div
                   className={`grid h-11 w-11 shrink-0 place-items-center rounded-xl text-primary ${
                     isError ? "bg-destructive/10 text-destructive" : "bg-primary/10"
@@ -206,7 +204,7 @@ const Library = () => {
                 </div>
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
-                    <div className="truncate text-sm font-medium text-foreground">{d.name}</div>
+                    <div className="truncate text-sm font-medium text-foreground">{doc.name}</div>
                     {isIndexing ? (
                       <span className="inline-flex items-center gap-1 rounded-full bg-warning/15 px-2 py-0.5 text-[10px] text-warning">
                         <Loader2 className="h-3 w-3 animate-spin" />
@@ -225,8 +223,8 @@ const Library = () => {
                     )}
                   </div>
                   <div className="mt-1 text-[11px] text-muted-foreground">
-                    {(d.size / 1_000_000).toFixed(1)} MB آ· {d.pages} {t("pages")} آ· {d.chunks} {t("chunks")} آ·{" "}
-                    {d.uploadedAt}
+                    {(doc.size / 1_000_000).toFixed(1)} MB | {doc.pages} {t("pages")} | {doc.chunks} {t("chunks")} |{" "}
+                    {doc.uploadedAt}
                   </div>
                   {isIndexing && typeof pct === "number" && (
                     <div className="mt-2 h-1 w-full overflow-hidden rounded-full bg-muted/60">

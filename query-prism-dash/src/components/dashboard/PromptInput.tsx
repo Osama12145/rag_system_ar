@@ -1,5 +1,7 @@
-import { useState, useRef, useEffect, KeyboardEvent } from "react";
-import { ArrowUp, Quote, Telescope, Brain, Paperclip } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, KeyboardEvent } from "react";
+import { ArrowUp, Brain, Paperclip, Quote, Telescope } from "lucide-react";
+
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useI18n } from "@/lib/i18n";
 
 export type ChatOptions = {
@@ -7,6 +9,8 @@ export type ChatOptions = {
   deepResearch: boolean;
   reasoning: boolean;
 };
+
+type PromptMode = "sourceCheck" | "deepResearch" | "reasoning";
 
 type Props = {
   value: string;
@@ -17,9 +21,12 @@ type Props = {
   attachmentsBusy?: boolean;
 };
 
+const INTRO_HINT_DURATION_MS = 4200;
+
 export function PromptInput({ value, onChange, onSubmit, onAttach, busy, attachmentsBusy }: Props) {
-  const { t } = useI18n();
-  const [mode, setMode] = useState<"sourceCheck" | "deepResearch" | "reasoning" | null>("sourceCheck");
+  const { t, lang } = useI18n();
+  const [mode, setMode] = useState<PromptMode | null>("sourceCheck");
+  const [showIntroHints, setShowIntroHints] = useState(true);
   const taRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -29,12 +36,55 @@ export function PromptInput({ value, onChange, onSubmit, onAttach, busy, attachm
     el.style.height = `${Math.min(el.scrollHeight, 220)}px`;
   }, [value]);
 
-  const toggle = (m: "sourceCheck" | "deepResearch" | "reasoning") =>
-    setMode((cur) => (cur === m ? null : m));
+  useEffect(() => {
+    const timer = window.setTimeout(() => setShowIntroHints(false), INTRO_HINT_DURATION_MS);
+    return () => window.clearTimeout(timer);
+  }, []);
 
-  const handleKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
+  const optionHelp = useMemo(
+    () => ({
+      sourceCheck: {
+        label: t("chip_source"),
+        title: lang === "ar" ? "للإجابات الموثقة" : "For cited answers",
+        description:
+          lang === "ar"
+            ? "يركز على دعم الرد بالمصادر والاقتباسات حتى تعرف المعلومة من أي مستند."
+            : "Keeps the answer grounded in visible citations so the user can trace each claim.",
+        icon: Quote,
+        tone: "cyan" as const,
+      },
+      deepResearch: {
+        label: t("chip_research"),
+        title: lang === "ar" ? "للبحث الأوسع" : "For broader research",
+        description:
+          lang === "ar"
+            ? "مناسب عندما تريد تحليلًا أوسع وتجميعًا من أكثر من جزء أو أكثر من ملف."
+            : "Best when the user wants a wider scan across multiple document sections or files.",
+        icon: Telescope,
+        tone: "violet" as const,
+      },
+      reasoning: {
+        label: t("chip_reasoning"),
+        title: lang === "ar" ? "للأسئلة التحليلية" : "For analytical questions",
+        description:
+          lang === "ar"
+            ? "يفيد في الأسئلة التي تحتاج تفكيرًا مرتبًا ومقارنة أو استنتاجًا أو تفصيلًا منطقيًا."
+            : "Useful for structured thinking, comparisons, inference, and more deliberate analysis.",
+        icon: Brain,
+        tone: "amber" as const,
+      },
+    }),
+    [lang, t],
+  );
+
+  const toggle = (nextMode: PromptMode) => {
+    setShowIntroHints(false);
+    setMode((currentMode) => (currentMode === nextMode ? null : nextMode));
+  };
+
+  const handleKey = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
       submit();
     }
   };
@@ -42,6 +92,7 @@ export function PromptInput({ value, onChange, onSubmit, onAttach, busy, attachm
   const submit = () => {
     const text = value.trim();
     if (!text || busy) return;
+    setShowIntroHints(false);
     onSubmit(text, {
       sourceCheck: mode === "sourceCheck",
       deepResearch: mode === "deepResearch",
@@ -51,34 +102,60 @@ export function PromptInput({ value, onChange, onSubmit, onAttach, busy, attachm
 
   const Chip = ({
     active,
-    onClick,
-    icon: Icon,
-    label,
-    tone,
+    modeKey,
   }: {
     active: boolean;
-    onClick: () => void;
-    icon: typeof Quote;
-    label: string;
-    tone: "cyan" | "violet" | "amber";
-  }) => (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium transition-all ${
-        active
-          ? tone === "cyan"
-            ? "border-primary/50 bg-primary/15 text-primary shadow-[0_0_20px_hsl(var(--primary)/0.25)]"
-            : tone === "violet"
-            ? "border-secondary/50 bg-secondary/15 text-secondary-glow shadow-[0_0_20px_hsl(var(--secondary)/0.25)]"
-            : "border-warning/50 bg-warning/15 text-warning shadow-[0_0_20px_hsl(var(--warning)/0.2)]"
-          : "border-border/60 bg-card/40 text-muted-foreground hover:border-border hover:text-foreground"
-      }`}
-    >
-      <Icon className="h-3.5 w-3.5" />
-      {label}
-    </button>
-  );
+    modeKey: PromptMode;
+  }) => {
+    const config = optionHelp[modeKey];
+    const Icon = config.icon;
+
+    return (
+      <Tooltip delayDuration={120}>
+        <div className="relative">
+          {showIntroHints && (
+            <div className="pointer-events-none absolute inset-x-0 bottom-full z-20 mb-2 flex justify-center animate-fade-in">
+              <div className="max-w-[190px] rounded-2xl border border-border/60 bg-background/90 px-3 py-2 text-center shadow-elevated backdrop-blur-xl">
+                <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-foreground/85">
+                  {config.title}
+                </div>
+                <div className="mt-1 text-[11px] leading-4 text-muted-foreground">{config.description}</div>
+              </div>
+            </div>
+          )}
+
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              onClick={() => toggle(modeKey)}
+              aria-label={`${config.label}. ${config.description}`}
+              className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium transition-all ${
+                active
+                  ? config.tone === "cyan"
+                    ? "border-primary/50 bg-primary/15 text-primary shadow-[0_0_20px_hsl(var(--primary)/0.25)]"
+                    : config.tone === "violet"
+                    ? "border-secondary/50 bg-secondary/15 text-secondary-glow shadow-[0_0_20px_hsl(var(--secondary)/0.25)]"
+                    : "border-warning/50 bg-warning/15 text-warning shadow-[0_0_20px_hsl(var(--warning)/0.2)]"
+                  : "border-border/60 bg-card/40 text-muted-foreground hover:border-border hover:text-foreground"
+              }`}
+            >
+              <Icon className="h-3.5 w-3.5" />
+              {config.label}
+            </button>
+          </TooltipTrigger>
+
+          <TooltipContent
+            side="top"
+            align="center"
+            className="max-w-[220px] rounded-2xl border-border/60 bg-card/95 px-3 py-2 text-start shadow-elevated"
+          >
+            <div className="text-[11px] font-semibold text-foreground">{config.title}</div>
+            <div className="mt-1 text-[11px] leading-4 text-muted-foreground">{config.description}</div>
+          </TooltipContent>
+        </div>
+      </Tooltip>
+    );
+  };
 
   return (
     <div className="glass-strong relative rounded-2xl border-border/60 p-3 shadow-elevated">
@@ -86,35 +163,17 @@ export function PromptInput({ value, onChange, onSubmit, onAttach, busy, attachm
       <textarea
         ref={taRef}
         value={value}
-        onChange={(e) => onChange(e.target.value)}
+        onChange={(event) => onChange(event.target.value)}
         onKeyDown={handleKey}
         rows={1}
         placeholder={t("prompt_placeholder")}
         className="w-full resize-none bg-transparent px-2 py-2 text-sm text-foreground outline-none placeholder:text-muted-foreground"
       />
       <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
-        <div className="flex flex-wrap items-center gap-2">
-          <Chip
-            active={mode === "sourceCheck"}
-            onClick={() => toggle("sourceCheck")}
-            icon={Quote}
-            label={t("chip_source")}
-            tone="cyan"
-          />
-          <Chip
-            active={mode === "deepResearch"}
-            onClick={() => toggle("deepResearch")}
-            icon={Telescope}
-            label={t("chip_research")}
-            tone="violet"
-          />
-          <Chip
-            active={mode === "reasoning"}
-            onClick={() => toggle("reasoning")}
-            icon={Brain}
-            label={t("chip_reasoning")}
-            tone="amber"
-          />
+        <div className={`flex flex-wrap items-center gap-2 transition-all ${showIntroHints ? "pt-12" : ""}`}>
+          <Chip active={mode === "sourceCheck"} modeKey="sourceCheck" />
+          <Chip active={mode === "deepResearch"} modeKey="deepResearch" />
+          <Chip active={mode === "reasoning"} modeKey="reasoning" />
         </div>
         <div className="flex items-center gap-2">
           <button
