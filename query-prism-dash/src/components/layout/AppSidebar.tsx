@@ -1,16 +1,17 @@
 import { useMemo } from "react";
-import { NavLink, useLocation } from "react-router-dom";
+import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import {
   Activity,
   Hexagon,
   LayoutDashboard,
   Library,
   MessageSquareText,
+  Plus,
   Settings,
   Zap,
 } from "lucide-react";
 
-import { useHealthQuery, useUsageQuery } from "@/lib/api";
+import { startNewSession, useHealthQuery, useUsageQuery } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 
 type SidebarContentProps = {
@@ -19,8 +20,9 @@ type SidebarContentProps = {
 };
 
 export function AppSidebarContent({ compact = false, onNavigate }: SidebarContentProps) {
-  const { t } = useI18n();
+  const { t, lang } = useI18n();
   const location = useLocation();
+  const navigate = useNavigate();
   const { data: health } = useHealthQuery();
   const { data: usage } = useUsageQuery();
 
@@ -38,6 +40,12 @@ export function AppSidebarContent({ compact = false, onNavigate }: SidebarConten
     Math.round(((usage?.used ?? 0) / Math.max(1, usage?.total ?? 1)) * 100),
   );
 
+  const handleNewChat = () => {
+    const sessionId = startNewSession();
+    navigate(`/?session=${encodeURIComponent(sessionId)}`);
+    onNavigate?.();
+  };
+
   return (
     <div className={`glass-strong flex h-full flex-col rounded-2xl ${compact ? "p-4" : "p-4"}`}>
       <NavLink to="/" className="group flex items-center gap-3 px-2 py-2" onClick={onNavigate}>
@@ -51,6 +59,16 @@ export function AppSidebarContent({ compact = false, onNavigate }: SidebarConten
       </NavLink>
 
       <nav className="mt-6 flex flex-1 flex-col gap-1">
+        <button
+          type="button"
+          onClick={handleNewChat}
+          title={lang === "ar" ? "ابدأ جلسة جديدة بدون حذف المحادثات المحفوظة." : "Start a fresh session without deleting saved conversations."}
+          className="mb-3 flex items-center gap-3 rounded-xl border border-primary/30 bg-primary/10 px-3 py-2.5 text-sm font-medium text-foreground transition-all hover:border-primary/50 hover:bg-primary/15"
+        >
+          <Plus className="h-4 w-4 text-primary" />
+          <span>{lang === "ar" ? "محادثة جديدة" : "New Chat"}</span>
+        </button>
+
         {items.map(({ to, icon: Icon, label }) => {
           const active = to === "/" ? location.pathname === "/" : location.pathname.startsWith(to);
           return (

@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { ArrowUpRight, Clock, MessageSquareText, Search } from "lucide-react";
+import { ArrowUpRight, Clock, MessageSquareText, Plus, Search } from "lucide-react";
 import { toast } from "sonner";
 
 import { AppShell } from "@/components/layout/AppShell";
-import { Session, useSessionsQuery } from "@/lib/api";
+import { Session, startNewSession, useSessionsQuery } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 
 const Interrogations = () => {
@@ -43,11 +43,28 @@ const Interrogations = () => {
     });
   }, [query, sessions]);
 
+  const handleStartNewChat = () => {
+    const sessionId = startNewSession();
+    navigate(`/?session=${encodeURIComponent(sessionId)}`);
+  };
+
   return (
     <AppShell>
       <div className="mx-auto w-full max-w-5xl">
-        <h1 className="text-3xl font-semibold tracking-tight text-foreground">{t("interrogations_title")}</h1>
-        <p className="mt-1 text-sm text-muted-foreground">{t("interrogations_subtitle")}</p>
+        <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+          <div>
+            <h1 className="text-3xl font-semibold tracking-tight text-foreground">{t("interrogations_title")}</h1>
+            <p className="mt-1 text-sm text-muted-foreground">{t("interrogations_subtitle")}</p>
+          </div>
+          <button
+            type="button"
+            onClick={handleStartNewChat}
+            className="inline-flex items-center gap-2 self-start rounded-full border border-primary/30 bg-primary/10 px-4 py-2 text-sm font-medium text-foreground transition-colors hover:border-primary/50 hover:bg-primary/15"
+          >
+            <Plus className="h-4 w-4 text-primary" />
+            {lang === "ar" ? "محادثة جديدة" : "New Chat"}
+          </button>
+        </div>
 
         <div className="relative mt-6">
           <Search className="absolute start-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />

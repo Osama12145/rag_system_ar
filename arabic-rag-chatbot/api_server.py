@@ -857,15 +857,26 @@ async def list_sessions(x_user_id: Optional[str] = Header(default=None, alias="X
             result = await db.execute(
                 text(
                     """
+                    WITH session_rollup AS (
+                        SELECT
+                            session_id,
+                            MAX(timestamp) AS updated_at,
+                            COUNT(*) AS message_count
+                        FROM chat_history
+                        WHERE user_id = :uid
+                        GROUP BY session_id
+                    )
                     SELECT
-                        session_id,
-                        MAX(timestamp) AS updated_at,
-                        COUNT(*) AS message_count,
-                        MAX(user_message) AS preview_text
-                    FROM chat_history
-                    WHERE user_id = :uid
-                    GROUP BY session_id
-                    ORDER BY updated_at DESC
+                        session_rollup.session_id,
+                        session_rollup.updated_at,
+                        session_rollup.message_count,
+                        chat_history.user_message AS preview_text
+                    FROM session_rollup
+                    JOIN chat_history
+                        ON chat_history.session_id = session_rollup.session_id
+                        AND chat_history.user_id = :uid
+                        AND chat_history.timestamp = session_rollup.updated_at
+                    ORDER BY session_rollup.updated_at DESC
                     LIMIT 20
                     """
                 ),

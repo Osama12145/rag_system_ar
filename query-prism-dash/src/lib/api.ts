@@ -241,6 +241,12 @@ export function setActiveSessionId(sessionId: string) {
   window.localStorage.setItem(`${ACTIVE_SESSION_STORAGE_KEY}:${getCurrentUserId()}`, sessionId);
 }
 
+export function startNewSession() {
+  const sessionId = createSessionId();
+  setActiveSessionId(sessionId);
+  return sessionId;
+}
+
 function withUserHeaders(init?: RequestInit): RequestInit {
   const headers = new Headers(init?.headers);
   headers.set("X-User-Id", getCurrentUserId());

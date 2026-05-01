@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 
 import { CitationsPanel } from "@/components/dashboard/CitationsPanel";
@@ -10,10 +10,9 @@ import { PromptInput, ChatOptions } from "@/components/dashboard/PromptInput";
 import { AppShell } from "@/components/layout/AppShell";
 import {
   Citation,
-  clearChatHistory,
-  createSessionId,
   getActiveSessionId,
   setActiveSessionId,
+  startNewSession,
   streamChat,
   uploadDocument,
   useHistoryQuery,
@@ -39,11 +38,12 @@ function toUiMessages(history: { role: "user" | "assistant"; content: string }[]
 const Dashboard = () => {
   const { t, lang } = useI18n();
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [searchParams] = useSearchParams();
   const requestedSessionId = searchParams.get("session")?.trim();
 
-  const [sessionId, setSessionId] = useState(() => requestedSessionId || getActiveSessionId() || createSessionId());
+  const [sessionId, setSessionId] = useState(() => requestedSessionId || getActiveSessionId() || startNewSession());
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<Msg[]>([]);
   const [busy, setBusy] = useState(false);
@@ -54,7 +54,7 @@ const Dashboard = () => {
   const historyQuery = useHistoryQuery(sessionId);
 
   useEffect(() => {
-    const nextSessionId = requestedSessionId || getActiveSessionId() || createSessionId();
+    const nextSessionId = requestedSessionId || getActiveSessionId() || startNewSession();
     setSessionId((current) => (current === nextSessionId ? current : nextSessionId));
     setActiveSessionId(nextSessionId);
   }, [requestedSessionId]);
@@ -62,6 +62,7 @@ const Dashboard = () => {
   useEffect(() => {
     setAllCitations([]);
     setActiveCitation(null);
+    setPanelOpen(false);
   }, [sessionId]);
 
   useEffect(() => {
@@ -174,19 +175,15 @@ const Dashboard = () => {
     setPanelOpen(true);
   };
 
-  const handleClearCurrentChat = useCallback(async () => {
-    try {
-      await clearChatHistory(sessionId);
-      await queryClient.invalidateQueries({ queryKey: ["history"] });
-      await queryClient.invalidateQueries({ queryKey: ["sessions"] });
-      setMessages([]);
-      setAllCitations([]);
-      setActiveCitation(null);
-      toast.success(lang === "ar" ? "تم مسح المحادثة الحالية." : "Current chat cleared.");
-    } catch {
-      toast.error(lang === "ar" ? "تعذر مسح المحادثة الحالية." : "Unable to clear the current chat.");
-    }
-  }, [lang, queryClient, sessionId]);
+  const handleStartNewChat = useCallback(() => {
+    const nextSessionId = startNewSession();
+    setMessages([]);
+    setInput("");
+    setAllCitations([]);
+    setActiveCitation(null);
+    setPanelOpen(false);
+    navigate(`/?session=${encodeURIComponent(nextSessionId)}`);
+  }, [navigate]);
 
   return (
     <AppShell>
@@ -204,7 +201,7 @@ const Dashboard = () => {
           <div className="min-h-0 flex-1 overflow-y-auto px-1 pt-4 md:pt-6">
             {historyQuery.isLoading ? (
               <div className="glass-card rounded-2xl p-6 text-sm text-muted-foreground">
-                {lang === "ar" ? "جارٍ تحميل المحادثة..." : "Loading conversation..."}
+                {lang === "ar" ? "جاري تحميل المحادثة..." : "Loading conversation..."}
               </div>
             ) : messages.length === 0 ? (
               <div className="animate-fade-in pb-6">
@@ -217,10 +214,10 @@ const Dashboard = () => {
                   </div>
                   <button
                     type="button"
-                    onClick={handleClearCurrentChat}
+                    onClick={handleStartNewChat}
                     className="rounded-full border border-border/60 bg-card/50 px-4 py-2 text-sm text-muted-foreground transition-colors hover:text-foreground"
                   >
-                    {lang === "ar" ? "بدء محادثة نظيفة" : "Reset current chat"}
+                    {lang === "ar" ? "محادثة جديدة" : "New Chat"}
                   </button>
                 </div>
 
@@ -233,10 +230,10 @@ const Dashboard = () => {
                 <div className="mb-4 flex justify-end">
                   <button
                     type="button"
-                    onClick={handleClearCurrentChat}
+                    onClick={handleStartNewChat}
                     className="rounded-full border border-border/60 bg-card/50 px-4 py-2 text-xs text-muted-foreground transition-colors hover:text-foreground"
                   >
-                    {lang === "ar" ? "مسح المحادثة الحالية" : "Clear current chat"}
+                    {lang === "ar" ? "محادثة جديدة" : "New Chat"}
                   </button>
                 </div>
                 <MessageList messages={messages} onCitationClick={handleCitationClick} />
