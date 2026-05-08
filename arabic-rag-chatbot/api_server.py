@@ -81,6 +81,29 @@ DOCUMENT_INVENTORY_PATTERNS = [
     "وش الوثائق",
     "ايش الوثائق",
 ]
+DOCUMENT_VISIBILITY_PATTERNS = [
+    "can you see the file",
+    "can you see my file",
+    "can you access the file",
+    "is the file uploaded",
+    "is my file uploaded",
+    "is the document ready",
+    "is my document ready",
+    "file ready",
+    "document ready",
+    "تقدر تشوف الملف",
+    "تقدر ترى الملف",
+    "تشوف الملف",
+    "شايف الملف",
+    "هل تشوف الملف",
+    "هل الملف موجود",
+    "هل الملف جاهز",
+    "هل المستند جاهز",
+    "الملف مرفوع",
+    "المستند مرفوع",
+    "وصل الملف",
+    "وصل المستند",
+]
 DOCUMENT_NAME_QUERY_PATTERNS = [
     "file named",
     "file name",
@@ -351,6 +374,11 @@ def is_document_inventory_query(query: str) -> bool:
     return any(pattern in normalized_query for pattern in DOCUMENT_INVENTORY_PATTERNS)
 
 
+def is_document_visibility_query(query: str) -> bool:
+    normalized_query = normalize_search_text(query)
+    return any(pattern in normalized_query for pattern in DOCUMENT_VISIBILITY_PATTERNS)
+
+
 async def get_user_documents_for_collection(user_id: str) -> List[tuple]:
     async with get_async_session() as db:
         result = await db.execute(
@@ -434,6 +462,52 @@ async def build_document_inventory_response(user_id: str, language: str) -> str:
     if language == "ar":
         return "الملفات المتوفرة حالياً هي:\n" + "\n".join(document_lines)
     return "The currently available documents are:\n" + "\n".join(document_lines)
+
+
+async def build_document_visibility_response(user_id: str, language: str) -> str:
+    rows = await get_user_documents_for_collection(user_id)
+    if not rows:
+        if language == "ar":
+            return (
+                "لا توجد ملفات مرفوعة حالياً.\n\n"
+                "ارفع ملف PDF أو DOCX أو TXT أولاً، وبعدها تقدر تطلب مني تلخيصه أو تسأل عن محتواه."
+            )
+        return (
+            "I don't see any uploaded documents yet.\n\n"
+            "Upload a PDF, DOCX, or TXT file first, then you can ask me to summarize it or answer questions about it."
+        )
+
+    ready_rows = [row for row in rows if (row[4] or "ready") == "ready"]
+    pending_rows = [row for row in rows if (row[4] or "ready") != "ready"]
+    visible_rows = ready_rows or rows
+
+    document_lines = [
+        f"- {filename}، {pages or 0} صفحة، {chunks or 0} جزء مفهرس"
+        if language == "ar"
+        else f"- {filename}, {pages or 0} pages, {chunks or 0} indexed chunks"
+        for _file_id, filename, pages, chunks, _status in visible_rows
+    ]
+
+    if language == "ar":
+        intro = "نعم، عندي الملف التالي مفهرس وجاهز للاستفسار:" if len(visible_rows) == 1 else "نعم، عندي الملفات التالية مفهرسة وجاهزة للاستفسار:"
+        if pending_rows and not ready_rows:
+            intro = "نعم، وصلتني الملفات التالية، لكنها قد تكون ما زالت قيد الفهرسة:"
+        return (
+            intro
+            + "\n"
+            + "\n".join(document_lines)
+            + "\n\nتقدر تسألني مثلاً: لخص الملف، ما أهم البنود، أو استخرج المعلومات الرئيسية."
+        )
+
+    intro = "Yes, I have this document indexed and ready for questions:" if len(visible_rows) == 1 else "Yes, I have these documents indexed and ready for questions:"
+    if pending_rows and not ready_rows:
+        intro = "Yes, I can see these documents, but they may still be indexing:"
+    return (
+        intro
+        + "\n"
+        + "\n".join(document_lines)
+        + "\n\nYou can ask me things like: summarize the file, list the key points, or extract the main information."
+    )
 
 
 def stream_plain_text_response(text_value: str):
@@ -690,6 +764,16 @@ async def chat(
             ui_language=request.language or "en",
         )
         logger.info("New query [%s]: %s", detected_language, user_message[:80])
+
+        if is_document_visibility_query(user_message):
+            visibility_response = await build_document_visibility_response(user_id, detected_language)
+            response_holder = {"ai_response": visibility_response}
+            queue_chat_persistence(background_tasks, session_id, user_id, user_message, response_holder)
+            return StreamingResponse(
+                stream_plain_text_response(visibility_response),
+                media_type="text/plain",
+                background=background_tasks,
+            )
 
         if is_document_inventory_query(user_message):
             inventory_response = await build_document_inventory_response(user_id, detected_language)
