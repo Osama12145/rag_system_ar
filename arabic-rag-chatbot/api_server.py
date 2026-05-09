@@ -25,6 +25,7 @@ from sqlalchemy import text
 from config import settings
 from database import ChatHistory, FileMetadata, close_db, get_async_session, init_db
 from document_processor import DocumentProcessor
+from query_router import QueryIntent, QueryRouter
 from rag_pipeline import RAGChatbot
 from vector_store import VectorStoreManager
 
@@ -41,6 +42,7 @@ moderation_logger.propagate = False
 
 vs_manager: Optional[VectorStoreManager] = None
 chatbot: Optional[RAGChatbot] = None
+query_router: Optional[QueryRouter] = None
 DEFAULT_USER_ID = "anonymous"
 UPLOAD_JOBS: Dict[str, Dict[str, Any]] = {}
 
@@ -162,7 +164,7 @@ async def _run_periodic(fn, interval_seconds: int) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize and clean up application resources."""
-    global vs_manager, chatbot
+    global vs_manager, chatbot, query_router
     logger.info("Starting application...")
     cleanup_task: Optional[asyncio.Task] = None
 
@@ -175,6 +177,7 @@ async def lifespan(app: FastAPI):
     try:
         vs_manager = VectorStoreManager()
         chatbot = RAGChatbot(vs_manager)
+        query_router = QueryRouter()
         cleanup_task = asyncio.create_task(_run_periodic(cleanup_old_jobs, interval_seconds=3600))
         if settings.RESTORE_CHAT_HISTORY_ON_STARTUP:
             logger.info("Chat history restore is enabled, but history is client-managed per session.")
@@ -510,6 +513,79 @@ async def build_document_visibility_response(user_id: str, language: str) -> str
     )
 
 
+async def build_latest_document_response(user_id: str, language: str) -> str:
+    rows = await get_user_documents_for_collection(user_id)
+    if not rows:
+        if language == "ar":
+            return (
+                "لا يوجد آخر ملف لأنك لم ترفع أي ملفات بعد.\n\n"
+                "ارفع ملف PDF أو DOCX أو TXT أولاً، ثم اسألني عنه."
+            )
+        return (
+            "There is no latest document yet because you have not uploaded any files.\n\n"
+            "Upload a PDF, DOCX, or TXT file first, then ask me about it."
+        )
+
+    _file_id, filename, pages, chunks, status = rows[0]
+    if language == "ar":
+        return (
+            "آخر ملف مرفوع عندك هو:\n"
+            f"- {filename}، {pages or 0} صفحة، {chunks or 0} جزء مفهرس، الحالة: {status or 'ready'}\n\n"
+            "تقدر تسألني مثلاً: لخص آخر ملف، ما أهم البنود، أو استخرج المعلومات الرئيسية."
+        )
+    return (
+        "Your latest uploaded document is:\n"
+        f"- {filename}, {pages or 0} pages, {chunks or 0} indexed chunks, status: {status or 'ready'}\n\n"
+        "You can ask me things like: summarize the latest file, list the key points, or extract the main information."
+    )
+
+
+def build_help_response(language: str) -> str:
+    if language == "ar":
+        return (
+            "طريقة الاستخدام:\n"
+            "1. ارفع ملف PDF أو DOCX أو TXT.\n"
+            "2. انتظر حتى تظهر حالته جاهزة.\n"
+            "3. اسأل عن محتواه، مثل: لخص الملف، ما أهم البنود، أو استخرج التواريخ والأسماء.\n\n"
+            "أقدر أساعدك أيضاً في معرفة الملفات المرفوعة أو آخر ملف جاهز للاستفسار."
+        )
+    return (
+        "How to use the app:\n"
+        "1. Upload a PDF, DOCX, or TXT file.\n"
+        "2. Wait until it is indexed and ready.\n"
+        "3. Ask about its content, such as: summarize the file, list key points, or extract dates and names.\n\n"
+        "I can also help you list uploaded files or identify the latest ready document."
+    )
+
+
+def build_out_of_scope_response(language: str) -> str:
+    if language == "ar":
+        return (
+            "لا أقدر أجاوب على هذا السؤال من خارج الملفات المرفوعة.\n\n"
+            "ارفع مستنداً أو اسأل عن محتوى الملفات الموجودة، وسأجاوبك بناءً عليها مع المصادر."
+        )
+    return (
+        "I can’t answer that from outside the uploaded documents.\n\n"
+        "Upload a document or ask about the existing files, and I’ll answer based on them with sources."
+    )
+
+
+def stream_direct_response(
+    background_tasks: BackgroundTasks,
+    session_id: str,
+    user_id: str,
+    user_message: str,
+    response_text: str,
+) -> StreamingResponse:
+    response_holder = {"ai_response": response_text}
+    queue_chat_persistence(background_tasks, session_id, user_id, user_message, response_holder)
+    return StreamingResponse(
+        stream_plain_text_response(response_text),
+        media_type="text/plain",
+        background=background_tasks,
+    )
+
+
 def stream_plain_text_response(text_value: str):
     yield text_value
 
@@ -767,34 +843,49 @@ async def chat(
 
         if is_document_visibility_query(user_message):
             visibility_response = await build_document_visibility_response(user_id, detected_language)
-            response_holder = {"ai_response": visibility_response}
-            queue_chat_persistence(background_tasks, session_id, user_id, user_message, response_holder)
-            return StreamingResponse(
-                stream_plain_text_response(visibility_response),
-                media_type="text/plain",
-                background=background_tasks,
-            )
+            return stream_direct_response(background_tasks, session_id, user_id, user_message, visibility_response)
 
         if is_document_inventory_query(user_message):
             inventory_response = await build_document_inventory_response(user_id, detected_language)
-            response_holder = {"ai_response": inventory_response}
-            queue_chat_persistence(background_tasks, session_id, user_id, user_message, response_holder)
-            return StreamingResponse(
-                stream_plain_text_response(inventory_response),
-                media_type="text/plain",
-                background=background_tasks,
-            )
+            return stream_direct_response(background_tasks, session_id, user_id, user_message, inventory_response)
 
         if is_specific_file_query(user_message):
             specific_file_response = await build_specific_file_response(user_id, user_message, detected_language)
             if specific_file_response:
-                response_holder = {"ai_response": specific_file_response}
-                queue_chat_persistence(background_tasks, session_id, user_id, user_message, response_holder)
-                return StreamingResponse(
-                    stream_plain_text_response(specific_file_response),
-                    media_type="text/plain",
-                    background=background_tasks,
-                )
+                return stream_direct_response(background_tasks, session_id, user_id, user_message, specific_file_response)
+
+        if query_router:
+            route = await query_router.classify(user_message, detected_language)
+            logger.info(
+                "Query route intent=%s confidence=%.2f reason=%s",
+                route.intent.value,
+                route.confidence,
+                route.reason[:80],
+            )
+
+            if route.intent == QueryIntent.METADATA_STATUS:
+                visibility_response = await build_document_visibility_response(user_id, detected_language)
+                return stream_direct_response(background_tasks, session_id, user_id, user_message, visibility_response)
+
+            if route.intent == QueryIntent.LATEST_DOCUMENT:
+                latest_response = await build_latest_document_response(user_id, detected_language)
+                return stream_direct_response(background_tasks, session_id, user_id, user_message, latest_response)
+
+            if route.intent == QueryIntent.DOCUMENT_INVENTORY:
+                inventory_response = await build_document_inventory_response(user_id, detected_language)
+                return stream_direct_response(background_tasks, session_id, user_id, user_message, inventory_response)
+
+            if route.intent == QueryIntent.HELP:
+                help_response = build_help_response(detected_language)
+                return stream_direct_response(background_tasks, session_id, user_id, user_message, help_response)
+
+            if route.intent == QueryIntent.OUT_OF_SCOPE:
+                out_of_scope_response = build_out_of_scope_response(detected_language)
+                return stream_direct_response(background_tasks, session_id, user_id, user_message, out_of_scope_response)
+
+        if not await get_user_documents_for_collection(user_id):
+            visibility_response = await build_document_visibility_response(user_id, detected_language)
+            return stream_direct_response(background_tasks, session_id, user_id, user_message, visibility_response)
 
         matched_file_ids = await find_matching_file_ids(user_id, user_message)
         prefer_full_file_context = bool(matched_file_ids and is_file_content_query(user_message))
